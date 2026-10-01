@@ -1,0 +1,19 @@
+# Python dependencies for TestCase.
+#
+# Only one entry, and that is deliberate: everything else the test scripts need
+# is in the standard library. Sockets, hashing, subprocesses and path handling
+# all have stdlib answers.
+#
+#     pip install -r requirements.txt
+#
+# On Debian the distribution package works just as well and needs no venv:
+#
+#     apt install python3-serial
+#
+# Serial access on Linux additionally requires the user to be in the dialout
+# group. Without it every port open fails with a permission error, which reads
+# like a missing adapter rather than a missing group membership.
+#
+# The host-side checks run on a bare Python 3; a missing pyserial is reported by
+# name as a SKIP rather than crashing.
+pyserial>=3.5
