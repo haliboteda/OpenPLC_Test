@@ -588,6 +588,40 @@ compare_anchor("calibration area layout", {
     "porttool internal/calarea/calarea.go": get_calib_layout_go(PORTTOOL / "internal/calarea/calarea.go"),
 })
 
+# --- AI conversion constants (mirror 14) --------------------------------------
+# The fixture computes the nominal value it fits against with the same divider,
+# shunt and full scale the app applies; if they differ, every coefficient is off.
+def get_ai_consts_c(path):
+    if not Path(path).exists():
+        return None
+    t = read_text(path)
+    div = re.search(r"pin_mv\(raw\)\s*\*\s*\(([\d.]+)f\s*/\s*([\d.]+)f\)", t)
+    shunt = re.search(r"pin_mv\(raw\)\s*/\s*([\d.]+)f", t)
+    fs = re.search(r"raw\s*\*\s*([\d.]+)f\s*/\s*\(float\)OPENPLC_ADC_FULL", t)
+    if not (div and shunt and fs):
+        return None
+    return "div=%g/%g;shunt=%g;fs=%g" % (float(div.group(1)), float(div.group(2)),
+                                          float(shunt.group(1)), float(fs.group(1)))
+
+
+def get_ai_consts_js(path):
+    if not Path(path).exists():
+        return None
+    t = read_text(path)
+    div = re.search(r"aicalPinMv\(raw\)\s*\*\s*([\d.]+)\s*/\s*([\d.]+)", t)
+    shunt = re.search(r"aicalPinMv\(raw\)\s*/\s*([\d.]+)", t)
+    fs = re.search(r"function aicalPinMv\(raw\)\s*\{\s*return raw\s*\*\s*([\d.]+)\s*/", t)
+    if not (div and shunt and fs):
+        return None
+    return "div=%g/%g;shunt=%g;fs=%g" % (float(div.group(1)), float(div.group(2)),
+                                          float(shunt.group(1)), float(fs.group(1)))
+
+
+compare_anchor("AI conversion constants", {
+    "core OpenPLC_Ports/src/openplc_analog.c": get_ai_consts_c(LIVE / "libraries/OpenPLC_Ports/src/openplc_analog.c"),
+    "porttool ptpanel/web/index.html": get_ai_consts_js(PORTTOOL / "internal/ptpanel/web/index.html"),
+})
+
 # --- what this script does not check ----------------------------------------
 Section("not covered by this script -- still manual")
 print("  - $CORE_LIVE vs $CORE_REPO: use tools/check_core_sync.py")
