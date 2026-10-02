@@ -1,8 +1,9 @@
-# fakeboard — IAPTool's pre-transfer decisions, without a board
+# IAPTool's pre-transfer decisions, without a board
 
-`fake_board.py` is the stand-in device. `run_cases.py` drives the real
-`IAPTool.exe` against it, covering the decision the tool makes *before* any
-firmware moves:
+The device is the bootloader stand-in, `../bootstand/`: the real bootloader
+code built for the PC (`$PROD/docs/engineering/BOOTLOADER-STAND-IN.md`).
+`run_cases.py` drives the real `IAPTool.exe` against it, covering the decision
+the tool makes *before* any firmware moves:
 
 | Suite | Case | Covers | What it checks |
 |---|---|---|---|
@@ -22,7 +23,7 @@ That decision has seven outcomes. All seven are checked here.
 |---|---|---|---|
 | `key-match` | the key IAPTool signs with | private key, no certificate | `Signing key matches this board` |
 | `key-mismatch` | a different key | private key, no certificate | refuses: `verifies against a different signing key` |
-| `old-bootload` | `Unknown command` | private key, no certificate | proceeds: `skipping key match check` |
+| `old-bootload` | `Unknown command` (the stand-in's `--old-bootloader`, as v0.1.0–v0.1.2 answered) | private key, no certificate | proceeds: `skipping key match check` |
 | `cert-match` | the root that issued the certificate | leaf key + its certificate | `Certificate was issued by this board's root` |
 | `cert-wrong-root` | a different key | leaf key + its certificate | refuses: `was not issued by this board's root` |
 | `cert-key-mismatch` | the issuing root | a certificate covering somebody else's key | refuses: `was issued for a different key` |
@@ -39,14 +40,15 @@ this my key". No branch, no second code path.
 
 ## Why it is not a hardware test
 
-Each row differs only in which key the *bootloader was compiled with*. On real
-hardware, moving between rows means rebuilding and reflashing the bootloader
-with a different key — one ST-Link round per case to check one branch of host-side
-logic. Here it is a command-line argument.
+Each row differs only in which root the board trusts. On real hardware,
+moving between rows means a factory reset and a claim per case, by hand. Here
+the stand-in starts from erased flash and claims the root given on its command
+line (`--root`), exactly as a `takeown` would.
 
-`fake_board.py` verifies nothing at all. It answers protocol commands with fixed
-strings. **What is under test is IAPTool**; the device's own signature checking
-is case T1-11, against real hardware.
+**What is under test is IAPTool**, but the board side is real: a case that gets
+past IAPTool's checks uploads, and the bootloader code verifies the nonce
+signature, CRC and image signature before it accepts the image. Signature
+checking on real hardware is case T1-11.
 
 ## Running
 
@@ -55,8 +57,9 @@ python run_cases.py              # all seven
 python run_cases.py --keep       # keep the scratch directory to inspect logs
 ```
 
-Needs `python` and `go` on PATH. Builds `IAPTool.exe` if it is missing.
-Also run as steps K1-K7 of `tools/selfcheck.py`.
+Needs `python` and `go` on PATH, and `HOST_CC` plus CMake (on PATH or beside
+`HOST_CC`) to build the stand-in, which it does every run. Builds `IAPTool.exe`
+if it is missing. Also run as step T1-18a-T1-18g of `tools/selfcheck.py`.
 
 ## Two things the runner has to do that are not obvious
 

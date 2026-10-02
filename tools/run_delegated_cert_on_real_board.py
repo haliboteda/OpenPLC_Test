@@ -217,7 +217,7 @@ def main():
 
     if uploaded and started and not rejected:
         Ok("PASS - a real board accepted a delegated certificate and ran the image it names.")
-        Ok("       This is the span T1-18d/e/f (fake board) and T1-16 (host) cannot reach.")
+        Ok("       This is the span T1-18d/e/f (bootloader stand-in) and T1-16 (host) cannot reach.")
         return 0
     Fail("FAIL - the delegated certificate did not carry an image into execution.")
     return 1

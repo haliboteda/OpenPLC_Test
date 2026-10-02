@@ -11,7 +11,7 @@ English: [README.md](README.md)
 - 根目录的 `*.go`：`TestCase`，通过网口对着真板子的 bootloader 测。它 import IAPTool 的
   `iapcert` / `iapproto` 包。
 - `tools/check_*.py`：契约检查 —— 版本号、跨仓镜像代码、板卡包里的 IAPTool、黄金测试向量。
-- `host/`：不需要板子的检查（给 IAPTool 用的假板子、Renode）。
+- `host/`：不需要板子的检查：bootloader 替身（真 bootloader 代码编成的 PC 程序，IAPTool 的上传用例对着它跑），以及 Renode。
 - `tools/run_*.py`、`onboard/`：上板用例和它们烧进板子的 sketch。
 
 ## 需要什么

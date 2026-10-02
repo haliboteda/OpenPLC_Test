@@ -12,7 +12,8 @@
 |---|---|
 | 根目录的 `.go` | `TestCase.exe`：对着真板子测 bootloader 的网口协议、签名、认证。import IAPTool 仓的 `iapcert` / `iapproto` 并调 IAPTool.exe |
 | `tools/check_version_sync.py`、`check_mirror_sync.py`、`check_tool_sync.py`、`check_golden_vectors.py` | 契约测试 P1、P2、P11、黄金向量：几个仓对同一份格式、常量、版本理解一致 |
-| `host/fakeboard/` | T1-18a–g（假板子上测 IAPTool 上传前的密钥/证书核对）、T1-34（IDE 那条上传命令）。假板子用端口 61865，不用产品端口 56865 |
+| `host/bootstand/` | bootloader 替身：`$BOOT` 的真 bootloader 代码和板卡包 app 一侧的重启握手，编成 PC 程序（`bootstand_boot` / `bootstand_app`），由 `bootstand.py` 按复位轮流启动。设计见 `$PROD/docs/engineering/BOOTLOADER-STAND-IN.md` |
+| `host/fakeboard/` | T1-18a–g（IAPTool 上传前的密钥/证书核对）、T1-34（IDE 那条上传命令），都对着上面的替身跑。替身用端口 61865，不用产品端口 56865 |
 | `host/renode/` | T3-05：例程在 Renode 里经真 bootloader 启动 |
 | `tools/run_*.py`、`onboard/` | 上板用例的驱动和板上 sketch |
 | `tools/build_image.py`、`flash_bootloader.py`、`enter_bootloader.py`、`reset_board_to_factory_state.py`、`serial_watch.py` 等 | 上板用的基础设施：命令行编 bootloader、ST-Link 烧录、摆板子状态、抓串口 |

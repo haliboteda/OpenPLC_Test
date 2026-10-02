@@ -10,3 +10,6 @@ config/
 
 # Personal Claude Code allowlist; .claude/settings.json is the shared one.
 .claude/settings.local.json*
+
+# The bootloader stand-in build (host/bootstand, built by its test drivers).
+host/bootstand/build/

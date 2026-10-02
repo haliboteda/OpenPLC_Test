@@ -1,13 +1,15 @@
-"""Drives the real IAPTool against fake_board.py and checks the decision it
-makes about who may talk to this board -- before any firmware is sent. Cases
-T1-18a-T1-18g, plus T2-28-T2-30 for claiming a board that has no root.
+"""Drives the real IAPTool against the bootloader stand-in and checks the
+decision it makes about who may talk to this board -- before any firmware is
+sent. Cases T1-18a-T1-18g, plus T2-28-T2-30 for claiming a board that has no
+root.
 
 Why this cannot be done on a real board: the outcomes below differ only in
 which root the board trusts, and in what key and certificate are present on
 the host. Here both are arguments.
 
-What is under test is IAPTool, not the device. fake_board.py verifies nothing;
-device-side verification is covered by S1 against real hardware.
+The board side is the real bootloader code ($TEST/host/bootstand), so an
+upload that gets past IAPTool's checks is verified the way a board verifies
+it: nonce signature, CRC, image signature against the root.
 
     python run_cases.py              run all cases
     python run_cases.py --keep       keep the scratch directory for inspection
@@ -15,8 +17,8 @@ device-side verification is covered by S1 against real hardware.
 Two things worth knowing:
 
   * "python is not on PATH" is not checked. This interpreter is what launches
-    fake_board.py, so there is nothing to look up -- gating on the literal
-    "python" is what would stop the suite on a python3-only machine.
+    the stand-in's supervisor, so there is nothing to look up -- gating on the
+    literal "python" is what would stop the suite on a python3-only machine.
   * the IAPTool copy keeps the platform's executable suffix rather than
     hardcoding ".exe".
 
@@ -33,10 +35,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _common import (Fail, Ok, Section, build_iap_tool,  # noqa: E402
-                     fixed_bytes, have_cmd, isolated_env, nonblank_lines,
-                     parse_pubkey, read_text, resolve_port, run_env,
-                     stage_iap_tool, start_fake_board, stop_fake_board,
-                     user_key_path, wait_for_listener)
+                     build_stand_in, fixed_bytes, have_cmd, isolated_env,
+                     nonblank_lines, parse_pubkey, read_text, resolve_port,
+                     run_env, stage_iap_tool, start_stand_in, stop_stand_in,
+                     user_key_path, wait_for_serving)
 
 
 def main():
@@ -49,9 +51,10 @@ def main():
         return 2
 
     iap_tool = build_iap_tool()
+    build_stand_in()
     port = resolve_port()
 
-    scratch = Path(tempfile.mkdtemp(prefix="fakeboard-"))
+    scratch = Path(tempfile.mkdtemp(prefix="bootstand-"))
     print("scratch: %s" % scratch)
 
     iap_run = stage_iap_tool(scratch, iap_tool, port)
@@ -119,7 +122,8 @@ def main():
         {"id": "key-mismatch", "pub": bad_hex, "key": good_key,
          "expect": ["verifies against a different signing key",
                     "IAPTool pubkey", "IAPTool cert"]},
-        {"id": "old-bootload", "pub": "unknown", "key": good_key,
+        # A bootloader from before getpubkey (v0.1.0-v0.1.2), trusting good_key.
+        {"id": "old-bootload", "pub": good_hex, "old": True, "key": good_key,
          "expect": ["skipping key match check"]},
         {"id": "cert-match", "pub": root_hex, "key": leaf_key,
          "expect": ["Certificate was issued by this board's root"]},
@@ -159,12 +163,16 @@ def main():
             shutil.copy2(str(c["place"]), str(user_key))
         placed = user_key.read_bytes() if user_key.exists() else None
 
-        board, board_log, handles = start_fake_board(
-            scratch, c["id"], [c["pub"], "30", "--port", port])
+        board_argv = ["--fresh", "--lifetime", "60", "--port", port]
+        if c["pub"] != "none":
+            board_argv += ["--root", c["pub"]]
+        if c.get("old"):
+            board_argv.append("--old-bootloader")
+        board, board_log, handles = start_stand_in(scratch, c["id"], board_argv)
 
-        if not wait_for_listener(port):
-            Fail("fake board never listened on %s" % port)
-            stop_fake_board(board, handles)
+        if not wait_for_serving(board_log):
+            Fail("the stand-in never came up on %s" % port)
+            stop_stand_in(board, handles)
             if board_log.exists():
                 for line in re.split(r"\r?\n", read_text(board_log)):
                     print("  %s" % line)
@@ -177,15 +185,16 @@ def main():
         out, _ = run_env(argv, env)
 
         # log= so the process is provably gone before the next case binds the
-        # same port -- see stop_fake_board().
-        stop_fake_board(board, handles, log=board_log)
+        # same port -- see stop_stand_in().
+        stop_stand_in(board, handles, log=board_log)
         blog = read_text(board_log)
 
         # Deliberately case-insensitive.
         problems = ["expected %r" % e for e in c["expect"] if e.lower() not in out.lower()]
         check = c.get("check")
         if check:
-            m = re.search(r"TAKEOWN ACCEPTED ([0-9a-f]{128})", blog)
+            # The bootloader half prints the root whenever it changes.
+            m = re.search(r"\[stand-in\] root ([0-9a-f]{128})", blog)
             claimed = m.group(1) if m else ""
             if not claimed:
                 problems.append("the board was never claimed")
@@ -198,7 +207,7 @@ def main():
                     problems.append("the board was claimed for a key other than the existing one")
                 if user_key.read_bytes() != placed:
                     problems.append("the existing key was replaced")
-            if "IMAGE FULLY RECEIVED" not in blog:
+            if "Checksum and signature OK" not in blog:
                 problems.append("the upload did not follow the claim")
 
         if not problems:

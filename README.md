@@ -13,7 +13,7 @@ agree with each other and that the user's paths work on a real board.
   the network. It imports IAPTool's `iapcert` / `iapproto` packages.
 - `tools/check_*.py`: contract checks -- version numbers, mirrored code, the
   packaged IAPTool, the golden test vectors.
-- `host/`: checks that need no board (fake board for IAPTool, Renode).
+- `host/`: checks that need no board: the bootloader stand-in (the real bootloader code built for the PC) that IAPTool's upload cases run against, and Renode.
 - `tools/run_*.py`, `onboard/`: on-board cases and the sketches they flash.
 
 ## Requirements

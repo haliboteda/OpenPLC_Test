@@ -1,4 +1,5 @@
-"""Case T1-34: the Arduino IDE's upload command, run against fake_board.py.
+"""Case T1-34: the Arduino IDE's upload command, run against the bootloader
+stand-in ($TEST/host/bootstand: the real bootloader and app-side IAP code).
 
 What the IDE runs is `arduino-cli upload -l network -p <ip>` with
 upload_method=ethMethod, which calls the IAPTool inside the board package with
@@ -18,7 +19,7 @@ and received the whole image.
 
 Isolation: the package's IAPTool is copied to a scratch directory without the
 package's keys/ directory, and APPDATA / TEMP point into scratch, so the real
-user key and the upload lock are never touched. The fake board has its own UID, so no real
+user key and the upload lock are never touched. The stand-in has its own UID, so no real
 board's discovery reply can be taken for it.
 
 Criterion and what this cannot test: $PROD/docs/modules/M1-firmware-upgrade.md, T1-34.
@@ -42,9 +43,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _common import (DISCOVERY_PORT, Fail, Ok, Section, cfg,  # noqa: E402
-                     nonblank_lines, read_text, resolve_port, start_fake_board,
-                     stop_fake_board, wait_for_listener)
+from _common import (DISCOVERY_PORT, Fail, Ok, Section, build_stand_in,  # noqa: E402
+                     cfg, nonblank_lines, read_text, resolve_port, start_stand_in,
+                     stop_stand_in, wait_for_serving)
 from common import EXE, get_iap_tool  # noqa: E402
 
 FQBN = ("OpenPLC_Alpha:stm32:OPEN-PLC:pnum=PLC_H743,usb=CDCgen,xusb=FS,"
@@ -53,7 +54,8 @@ EXAMPLE = "DO_Outputs"
 # Not a real STM32 UID: IAPTool matches boards by UID, so a real board on the
 # LAN can never be mistaken for this one.
 FAKE_UID = "fa4eb0a2d0000000000000a1"
-# Older than any sketch, so the version gate never refuses.
+# What the stand-in's application half reports (its CMake APP_VERSION): older
+# than any sketch, so the version gate never refuses.
 BOARD_APP_VERSION = "0.0.1"
 # discovery takes ~1.3 s to start on Windows; arduino-cli's default wait is 1 s.
 DISCOVERY_TIMEOUT = "10s"
@@ -101,7 +103,7 @@ def pubkey_of(iap, pem, env):
     return m.group(0) if m else None
 
 
-def find_fake_port(env):
+def find_stand_in_port(env):
     """The address discovery lists for FAKE_UID -- what the IDE's port menu shows."""
     out, _ = run(cli_argv("board", "list", "--format", "json",
                           "--discovery-timeout", DISCOVERY_TIMEOUT), env=env)
@@ -114,6 +116,36 @@ def find_fake_port(env):
         if port.get("protocol") == "network" and port.get("hardware_id", "").lower() == FAKE_UID:
             return port.get("address")
     return None
+
+
+def prepare_claimed(scratch, state, iap, binary, owner_pub, owner_pem, port, env, tmp):
+    """A stand-in claimed for owner_pub with binary installed, left in state."""
+    Section("prepare a claimed board running an app")
+    board, board_log, handles = start_stand_in(
+        scratch, "prepare", ["--state", state, "--fresh", "--root", owner_pub,
+                             "--lifetime", "120", "--port", port, "--uid", FAKE_UID])
+    out, rc = "", -1
+    try:
+        if not wait_for_serving(board_log):
+            Fail("the stand-in never came up")
+            return False
+        out, rc = run([iap, "ether", binary, "127.0.0.1", "--key=%s" % owner_pem], env=env)
+        # The image is in once the bootloader has verified it and handed over.
+        deadline = time.time() + 20
+        while time.time() < deadline and "[stand-in] app " not in read_text(board_log):
+            time.sleep(0.2)
+    finally:
+        stop_stand_in(board, handles, log=board_log)
+        lock = tmp / LOCK_NAME
+        if lock.exists():
+            lock.unlink()
+    if rc != 0 or "[stand-in] app " not in read_text(board_log):
+        Fail("could not install the sketch on the stand-in (rc=%d):" % rc)
+        for ln in nonblank_lines(out)[-10:]:
+            print("    " + ln)
+        return False
+    Ok("claimed for the owner key, %s installed" % binary.name)
+    return True
 
 
 def main():
@@ -151,6 +183,7 @@ def run_cases(scratch, env, user_keys, tmp, started):
         return 2
     print("  %s, %d bytes (%.0f s)" % (binary.name, binary.stat().st_size, time.time() - started))
 
+    build_stand_in()
     tool_dir = scratch / "tool"
     iap = stage_tool(tool_dir)
     if iap is None:
@@ -167,6 +200,13 @@ def run_cases(scratch, env, user_keys, tmp, started):
     owner_pub = pubkey_of(iap, owner_pem, env) if owner_pem.exists() else None
     if not (owner_pub and other_pem.exists()):
         Fail("could not prepare keys with %s" % iap)
+        return 2
+
+    # A board that is claimed and runs an app is made the way a real one is:
+    # claim a factory board for the owner key and upload the sketch once. The
+    # cases that need it start from a copy of that state.
+    claimed_state = scratch / "claimed_template"
+    if not prepare_claimed(scratch, claimed_state, iap, binary, owner_pub, owner_pem, port, env, tmp):
         return 2
 
     # id, key the board trusts ("none" = factory board in its bootloader),
@@ -188,39 +228,46 @@ def run_cases(scratch, env, user_keys, tmp, started):
         if user_key is not None:
             shutil.copy2(str(user_key), str(user_dest))
 
-        board_argv = [trusted, "180", "--port", port, "--discovery-port", DISCOVERY_PORT,
-                      "--uid", FAKE_UID]
-        if not factory:
-            board_argv += ["--app", BOARD_APP_VERSION]
-        board, board_log, handles = start_fake_board(scratch, cid, board_argv)
+        state = scratch / ("state_%s" % cid)
+        board_argv = ["--state", state, "--lifetime", "180", "--port", port,
+                      "--discovery-port", DISCOVERY_PORT, "--uid", FAKE_UID]
+        if factory:
+            board_argv.append("--fresh")
+        else:
+            shutil.copytree(str(claimed_state), str(state))
+        board, board_log, handles = start_stand_in(scratch, cid, board_argv)
         t0 = time.time()
         try:
-            if not wait_for_listener(port):
-                Fail("fake board never listened on %s" % port)
+            if not wait_for_serving(board_log):
+                Fail("the stand-in never came up on %s" % port)
                 failed += 1
                 continue
             if ip is None:
-                ip = find_fake_port(env)
+                ip = find_stand_in_port(env)
                 if ip is None:
-                    Fail("discovery did not list the fake board (uid %s)" % FAKE_UID)
+                    Fail("discovery did not list the stand-in (uid %s)" % FAKE_UID)
                     return 2
-                print("  fake board listed at %s" % ip)
+                print("  stand-in listed at %s" % ip)
             out, rc = run(cli_argv("upload", "--fqbn", FQBN, "--input-dir", binary.parent,
                                    "-p", ip, "-l", "network",
                                    "--discovery-timeout", DISCOVERY_TIMEOUT,
                                    "--upload-property", "path=%s" % tool_dir), env=env)
         finally:
-            stop_fake_board(board, handles, log=board_log)
+            stop_stand_in(board, handles, log=board_log)
             # A failed upload leaves its lock, which keeps discovery silent for 90 s.
             lock = tmp / LOCK_NAME
             if lock.exists():
                 lock.unlink()
 
         blog = read_text(board_log)
-        got = re.search(r"IMAGE FULLY RECEIVED (\d+) bytes", blog)
-        full = got is not None and int(got.group(1)) == binary.stat().st_size
-        rebooted = "REBOOT ACCEPTED" in blog
-        came_back = blog.count("then CUSAPP") == 1
+        # Read off what the real code printed: the bootloader verified an image
+        # of the announced size, the app half took a reboot request, and the app
+        # half was serving again after the image.
+        got = re.search(r"File size (\d+), checksum", blog)
+        verified = blog.find("Checksum and signature OK")
+        full = got is not None and int(got.group(1)) == binary.stat().st_size and verified >= 0
+        rebooted = "ethernet upload requested" in blog
+        came_back = verified >= 0 and blog.find("[stand-in] app ", verified) >= 0
         problems = []
         if line.lower() not in out.lower():
             problems.append("expected line not in arduino-cli output")
@@ -228,7 +275,7 @@ def run_cases(scratch, env, user_keys, tmp, started):
             if rc != 0:
                 problems.append("arduino-cli exited %d" % rc)
             if factory:
-                if "TAKEOWN ACCEPTED" not in blog:
+                if not re.search(r"\[stand-in\] root [0-9a-f]{128}", blog):
                     problems.append("board was never claimed")
                 if not user_dest.exists():
                     problems.append("no key was generated at %s" % user_dest)
@@ -236,15 +283,15 @@ def run_cases(scratch, env, user_keys, tmp, started):
                 if not rebooted:
                     problems.append("board never accepted a reboot request")
                 if not came_back:
-                    problems.append("board did not go silent after the image")
+                    problems.append("board did not come back as an app after the image")
             if not full:
                 problems.append("board did not receive the full image")
         else:
             if rc == 0:
                 problems.append("arduino-cli exited 0")
-            if "REBOOT REFUSED" not in blog or rebooted:
+            if "Rejected unauthenticated openplc_server_reboot request" not in blog or rebooted:
                 problems.append("board did not refuse the reboot request")
-            if "CMD 'flash" in blog:
+            if "File size" in blog:
                 problems.append("board was sent a flash command")
 
         if problems:

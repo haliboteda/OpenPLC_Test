@@ -1,4 +1,5 @@
-"""Shared by the suites that drive the real IAPTool against fake_board.py.
+"""Shared by the suites that drive the real IAPTool against the bootloader
+stand-in ($TEST/host/bootstand, the real bootloader code built for the PC).
 
 Everything below used to be copied into each script by hand. That is the shape
 treats as a defect: two copies drift, and the port is the moment to stop
@@ -12,7 +13,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -25,7 +25,8 @@ from common import (EXE, GOOS_DIR, Fail, Ok, Section, Warn, cfg,  # noqa: E402
                     get_go_bin, have_cmd, nonblank_lines, python_exe,
                     read_text, run_capture)
 
-FAKE_BOARD = HERE / "fake_board.py"
+STAND_IN = HERE.parent / "bootstand"
+STAND_IN_BUILD = STAND_IN / "build"
 # Not the product port 56865: something else on a bench may hold it (on the
 # development PC, airtcp binds 56865/TCP). The staged IAPTool is given the same
 # port, so the two cannot drift. See HOW-TO-RUN-TESTS.md, host/fakeboard.
@@ -72,7 +73,7 @@ def run_env(argv, env, cwd=None):
 
 
 def resolve_port():
-    """The port the fake board serves and the staged IAPTool dials."""
+    """The port the stand-in serves and the staged IAPTool dials."""
     return TEST_PORT
 
 
@@ -129,41 +130,64 @@ def fixed_bytes(n, step, offset):
 
 
 
-def start_fake_board(scratch, case_id, argv_tail):
-    """Launch the stand-in board with its output captured to a log file.
+def build_stand_in():
+    """Configures and builds the stand-in from the bootloader and board package
+    repos named in config/machine.py. Exits 2 when that is not possible, since
+    no case can run without it.
 
-    Returns (process, log path, open file handles). fake_board.py prints with
-    flush=True, which is what makes killing it safe: a block-buffered child would
-    lose the very lines a case asserts on.
+    cmake and ninja are looked up on PATH and then beside HOST_CC, where a
+    MinGW install keeps them."""
+    host_cc = getattr(cfg, "HOST_CC", "") or ""
+    env = dict(os.environ)
+    if host_cc:
+        env["PATH"] = str(Path(host_cc).parent) + os.pathsep + env.get("PATH", "")
+    cmake = shutil.which("cmake", path=env["PATH"])
+    if cmake is None or not host_cc:
+        Fail("cmake or HOST_CC not found - the stand-in cannot be built")
+        sys.exit(2)
+    gen = ["-G", "Ninja"] if shutil.which("ninja", path=env["PATH"]) else []
+    configure = [cmake, "-S", str(STAND_IN), "-B", str(STAND_IN_BUILD)] + gen + [
+        "-DCMAKE_C_COMPILER=%s" % host_cc,
+        "-DBOOT_ROOT=%s" % Path(cfg.BOOT_REPO).as_posix(),
+        "-DCORE_ROOT=%s" % Path(cfg.CORE_REPO).as_posix()]
+    for argv in (configure, [cmake, "--build", str(STAND_IN_BUILD)]):
+        proc = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, errors="replace")
+        if proc.returncode != 0:
+            Fail("building the stand-in failed:")
+            print(proc.stdout)
+            sys.exit(2)
+
+
+def start_stand_in(scratch, case_id, argv_tail):
+    """Launch the stand-in with its output captured to a log file.
+
+    Returns (process, log path, open file handles). Its state (flash, RAMs)
+    lives in scratch/state_<case_id> unless argv_tail names another --state.
     """
     log = scratch / ("board_%s.log" % case_id)
     out_fh = open(str(log), "wb")
     err_fh = open(str(log) + ".err", "wb")
-    proc = subprocess.Popen([python_exe(), str(FAKE_BOARD)] + [str(a) for a in argv_tail],
-                            stdout=out_fh, stderr=err_fh)
+    argv = [python_exe(), str(STAND_IN / "bootstand.py"), "--build", str(STAND_IN_BUILD)]
+    tail = [str(a) for a in argv_tail]
+    if "--state" not in tail:
+        argv += ["--state", str(scratch / ("state_%s" % case_id))]
+    proc = subprocess.Popen(argv + tail, stdout=out_fh, stderr=err_fh)
     return proc, log, (out_fh, err_fh)
 
 
-def stop_fake_board(proc, handles, log=None):
-    """Stop the stand-in board and make sure it is really gone.
+def stop_stand_in(proc, handles, log=None):
+    """Stop the stand-in and make sure it is really gone.
 
-    ⚠️ kill() alone is not enough, and the same trap has
-    the same hole -- it just loses the race less often because it is slower.
+    Two races, both of which once produced a FAIL whose stated reason had
+    nothing to do with the case:
 
-    Two races, both of which produced a FAIL whose stated reason had nothing to
-    do with the case:
-
-    1. The board's listening sockets stay bound until the process actually dies.
-       fake_board.py sets SO_REUSEADDR on its TCP socket, so the NEXT case's
-       board binds the same port happily and both are listening at once -- which
-       of them accepts is undefined. The symptom was a case failing with "board
-       was never sent a flash command" while its log held nothing but the startup
-       line, because the connections had been served by the previous case's
-       process and logged to the previous case's file. wait() closes that window.
-
+    1. Listening sockets stay bound until the process dies, and SO_REUSEADDR
+       lets the next case bind the same port while they do -- which of the two
+       accepts is then undefined. wait() closes that window; the supervisor's
+       job object takes the running half down with it.
     2. IAPTool exits as soon as it has sent the last byte, while the board is
-       still printing what it received. Killing it at that moment truncates the
-       log the assertions read. settle waits for the log to stop growing first.
+       still printing what it did with it. settle_log waits for the log first.
     """
     if log is not None:
         settle_log(log)
@@ -176,7 +200,7 @@ def stop_fake_board(proc, handles, log=None):
 def settle_log(log, quiet=0.25, timeout=3.0):
     """Wait until a log file stops growing, bounded.
 
-    fake_board.py prints with flush=True, so "stopped growing" really does mean
+    The stand-in writes unbuffered, so "stopped growing" really does mean
     "has written everything it is going to write" -- there is no buffer left to
     lose. Returns when quiet seconds pass with no new bytes, or at timeout.
     """
@@ -193,12 +217,13 @@ def settle_log(log, quiet=0.25, timeout=3.0):
         time.sleep(0.05)
 
 
-def wait_for_listener(port):
-    """Wait for the stand-in board rather than sleeping a fixed amount."""
-    for _ in range(100):
-        try:
-            with socket.create_connection(("127.0.0.1", int(port)), timeout=1):
-                return True
-        except OSError:
-            time.sleep(0.1)
+def wait_for_serving(log, timeout=15.0):
+    """Wait until the stand-in says a half is serving the network. Not a TCP
+    probe: the application half has no TCP listener, and a probe connection
+    would be a session the bootloader half has to deal with."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if log.exists() and " serving on " in read_text(log):
+            return True
+        time.sleep(0.1)
     return False
