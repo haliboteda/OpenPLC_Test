@@ -6,14 +6,13 @@ again, a jump to the application (exit 4) starts the application half. The
 board's memories persist in --state across all of it; see
 $PROD/docs/engineering/BOOTLOADER-STAND-IN.md.
 
-    python bootstand.py --state DIR [--fresh] [--root HEX128] [--old-bootloader]
+    python bootstand.py --state DIR [--fresh] [--root HEX128]
                         [--port N] [--discovery-port N] [--uid HEX24]
                         [--lifetime SECONDS] [--boot-window SECONDS]
 
   --fresh          start from erased flash and empty RAMs (a factory board)
   --root           setup only: claim the board for this public key on the first
                    boot, as a takeown would
-  --old-bootloader answer getpubkey as v0.1.0-v0.1.2 did (T1-18c)
   --boot-window    silence before each boot, the board's 2 s BOOT0 window
 
 Exits when --lifetime runs out or a half crashes. Killing this process kills
@@ -98,7 +97,6 @@ def main():
     ap.add_argument("--build", default=str(HERE / "build"))
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--root")
-    ap.add_argument("--old-bootloader", action="store_true")
     ap.add_argument("--port", default="61865")
     ap.add_argument("--discovery-port", default="0")
     ap.add_argument("--uid")
@@ -129,8 +127,6 @@ def main():
                     argv.append("--cold")
                     if args.root:
                         argv += ["--claim", args.root]
-                if args.old_bootloader:
-                    argv.append("--old-bootloader")
             else:
                 argv = [exe("bootstand_app", args.build)] + common
             cold = False

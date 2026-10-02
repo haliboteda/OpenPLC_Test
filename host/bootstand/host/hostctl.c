@@ -28,7 +28,7 @@ host_args_t host_args = { ".", 61865, 0, { 0x39333639U, 0x31325110U, 0x00330034U
 static void usage(void)
 {
 	fprintf(stderr, "usage: --state DIR [--port N] [--discovery-port N] [--uid HEX24] [--cold]"
-			" [--old-bootloader] [--claim HEX128]\n");
+			" [--claim HEX128]\n");
 	exit(2);
 }
 
@@ -75,8 +75,6 @@ void host_parse_args(int argc, char **argv)
 			i++;
 		} else if (strcmp(a, "--cold") == 0) {
 			host_args.cold = true;
-		} else if (strcmp(a, "--old-bootloader") == 0) {
-			host_args.old_bootloader = true;
 		} else if (strcmp(a, "--claim") == 0 && v) {
 			host_args.claim_hex = v; i++;
 		} else {

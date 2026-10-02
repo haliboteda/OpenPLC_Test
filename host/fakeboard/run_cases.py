@@ -122,9 +122,6 @@ def main():
         {"id": "key-mismatch", "pub": bad_hex, "key": good_key,
          "expect": ["verifies against a different signing key",
                     "IAPTool pubkey", "IAPTool cert"]},
-        # A bootloader from before getpubkey (v0.1.0-v0.1.2), trusting good_key.
-        {"id": "old-bootload", "pub": good_hex, "old": True, "key": good_key,
-         "expect": ["skipping key match check"]},
         {"id": "cert-match", "pub": root_hex, "key": leaf_key,
          "expect": ["Certificate was issued by this board's root"]},
         {"id": "cert-wrong-root", "pub": bad_hex, "key": leaf_key,
@@ -166,8 +163,6 @@ def main():
         board_argv = ["--fresh", "--lifetime", "60", "--port", port]
         if c["pub"] != "none":
             board_argv += ["--root", c["pub"]]
-        if c.get("old"):
-            board_argv.append("--old-bootloader")
         board, board_log, handles = start_stand_in(scratch, c["id"], board_argv)
 
         if not wait_for_serving(board_log):

@@ -17,13 +17,14 @@ the tool makes *before* any firmware moves:
 
 Before IAPTool sends a single byte of firmware it asks the device `getpubkey`
 and decides whether the key it would sign with is one the device will accept.
-That decision has seven outcomes. All seven are checked here.
+That decision has six outcomes. All six are checked here. (`T1-18c`, a
+bootloader too old to answer `getpubkey`, was dropped by decision 79: no
+backward compatibility while testing.)
 
 | Case | Board answers `getpubkey` | Host has | Expected |
 |---|---|---|---|
 | `key-match` | the key IAPTool signs with | private key, no certificate | `Signing key matches this board` |
 | `key-mismatch` | a different key | private key, no certificate | refuses: `verifies against a different signing key` |
-| `old-bootload` | `Unknown command` (the stand-in's `--old-bootloader`, as v0.1.0–v0.1.2 answered) | private key, no certificate | proceeds: `skipping key match check` |
 | `cert-match` | the root that issued the certificate | leaf key + its certificate | `Certificate was issued by this board's root` |
 | `cert-wrong-root` | a different key | leaf key + its certificate | refuses: `was not issued by this board's root` |
 | `cert-key-mismatch` | the issuing root | a certificate covering somebody else's key | refuses: `was issued for a different key` |

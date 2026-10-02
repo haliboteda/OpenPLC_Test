@@ -93,10 +93,5 @@ void bridge_init(u16_t fw_port, u16_t real_port, u16_t discovery_port);
 /* Waits up to timeout_ms for network events and runs the firmware callbacks
  * they trigger, plus the tcp_poll timers. */
 void bridge_poll(int timeout_ms);
-/* A hook that sees every TCP segment before the firmware does; returns 1 when
- * it consumed the segment (and answered through bridge_tcp_reply). */
-typedef int (*bridge_tcp_filter_fn)(struct tcp_pcb *pcb, const uint8_t *data, int len);
-void bridge_set_tcp_filter(bridge_tcp_filter_fn fn);
-void bridge_tcp_reply(struct tcp_pcb *pcb, const char *msg);
 
 #endif /* BOOTSTAND_LWIP_HOST_H_ */

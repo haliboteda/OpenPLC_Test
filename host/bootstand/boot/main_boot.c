@@ -52,19 +52,6 @@ static void print_root(void)
 	host_log("root %s", hex);
 }
 
-/* T1-18c: a bootloader older than getpubkey (v0.1.0-v0.1.2) answers it as it
- * answers anything it does not know. */
-static int old_bootloader_filter(struct tcp_pcb *pcb, const uint8_t *data, int len)
-{
-	if ((current_status == IDLE) && (len_in_RX_buffer == 0U) && (len >= 9)
-			&& (memcmp(data, "getpubkey", 9) == 0)) {
-		host_log("getpubkey answered as an old bootloader would");
-		bridge_tcp_reply(pcb, "Unknown command");
-		return 1;
-	}
-	return 0;
-}
-
 int main(int argc, char **argv)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -93,9 +80,6 @@ int main(int argc, char **argv)
 
 	net_rand_seed();
 	iap_auth_report_backup_domain();
-	if (host_args.old_bootloader) {
-		bridge_set_tcp_filter(old_bootloader_filter);
-	}
 	IAP_servers_start(mode);
 	host_log("bootloader serving on %u", (unsigned)host_args.port);
 

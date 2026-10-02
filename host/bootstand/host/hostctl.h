@@ -19,7 +19,6 @@ typedef struct {
 	uint16_t discovery_port;  /* 0 = none */
 	uint32_t uid[3];          /* HAL_GetUIDw0..2 */
 	bool cold;                /* first boot after power-on */
-	bool old_bootloader;      /* answer getpubkey with "Unknown command" (T1-18c) */
 	const char *claim_hex;    /* setup only: claim this root before booting */
 } host_args_t;
 

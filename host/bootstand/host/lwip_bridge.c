@@ -47,7 +47,6 @@ struct netif gnetif = { 1 };
 struct netif *netif_default = &gnetif;
 
 static u16_t s_fw_port, s_real_port, s_disc_port;
-static bridge_tcp_filter_fn s_filter;
 
 struct udp_pcb {
 	int used;
@@ -90,11 +89,6 @@ void bridge_init(u16_t fw_port, u16_t real, u16_t discovery_port)
 	s_fw_port = fw_port;
 	s_real_port = real;
 	s_disc_port = discovery_port;
-}
-
-void bridge_set_tcp_filter(bridge_tcp_filter_fn fn)
-{
-	s_filter = fn;
 }
 
 char *ipaddr_ntoa(const ip_addr_t *addr)
@@ -324,11 +318,6 @@ err_t tcp_write(struct tcp_pcb *pcb, const void *dataptr, u16_t len, u8_t apifla
 err_t tcp_output(struct tcp_pcb *pcb) { (void)pcb; return ERR_OK; }
 void tcp_recved(struct tcp_pcb *pcb, u16_t len) { (void)pcb; (void)len; }
 
-void bridge_tcp_reply(struct tcp_pcb *pcb, const char *msg)
-{
-	(void)tcp_write(pcb, msg, (u16_t)strlen(msg), TCP_WRITE_FLAG_COPY);
-}
-
 /* --- the loop ------------------------------------------------------------------ */
 
 static void on_udp(struct udp_pcb *pcb, sock_t s)
@@ -395,9 +384,6 @@ static void on_client(struct tcp_pcb_host *h)
 		if (!h->dead) {
 			tcp_kill(h, 0);
 		}
-		return;
-	}
-	if ((s_filter != NULL) && s_filter(&h->pub, (const uint8_t *)buf, n)) {
 		return;
 	}
 	struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)n, PBUF_RAM);
