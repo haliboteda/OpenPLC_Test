@@ -32,3 +32,8 @@ void iap_server_host_jump_to_app(uint32_t msp, uint32_t reset_vector)
 	host_log("jump to app");
 	host_exit(HOST_EXIT_APP);
 }
+
+/* The PC has no DO / AO pins to drive to 0 (decision 81, $BOOT/IAPServer/safe_outputs.c). */
+void safe_outputs_init(void)
+{
+}

@@ -279,8 +279,11 @@ def get_handoff_layout(path):
         return None
     text = read_text(path)
     parts = []
+    # RSR_* is the reset cause the bootloader publishes for the app (decision 80):
+    # a mismatch makes every sketch read "unknown".
     for k in ('BOOT_HANDOFF_ADDR', 'BOOT_HANDOFF_SIZE',
-              'BOOT_HANDOFF_MAGIC', 'BOOT_HANDOFF_VERSION'):
+              'BOOT_HANDOFF_MAGIC', 'BOOT_HANDOFF_VERSION',
+              'BOOT_HANDOFF_RSR_OFFSET', 'BOOT_HANDOFF_RSR_MAGIC'):
         m = re.search(r'#define\s+%s\s+(\S+)' % k, text)
         if not m:
             return None
