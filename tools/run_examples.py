@@ -23,11 +23,13 @@ import argparse
 import re
 import sys
 import time
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (cfg, Section, Ok, Fail, banner, decode_serial,  # noqa: E402
                     get_iap_tool, get_scratch_dir, run_capture, wait_for_board)
+import ymodem  # noqa: E402
 
 FQBN = ("OpenPLC_Alpha:stm32:OPEN-PLC:pnum=PLC_H743,usb=CDCgen,xusb=FS,"
         "upload_method=cdcMethod,knxrole=dual_device")
@@ -57,6 +59,8 @@ def di_steps():
 #   ("range", port, regex, lo, hi, s)  every captured number within lo..hi
 #   ("discover",)                      the address the example printed answers
 #                                      UDP discovery
+#   ("ymodem", port, name, data)       sends a file with YMODEM; the example must
+#                                      then print its length and CRC-32
 EXAMPLES = [
     {
         "name": "DI_Inputs",
@@ -165,6 +169,16 @@ EXAMPLES = [
         ],
     },
     {
+        "name": "SD_FileReceive",
+        "lib": "OpenPLC_Ports",
+        "ready": ("cdc", r"SD_FileReceive: send a file with YMODEM on RS232\."),
+        "steps": [
+            ("expect", [("cdc", r"SD: card inserted\r?\n")], 3.0),
+            ("ymodem", "rs232", "EXB.BIN",
+             bytes((i * 7 + 3) & 0xFF for i in range(3000))),
+        ],
+    },
+    {
         "name": "BoardTemperature",
         "lib": "OpenPLC_Ports",
         "ready": ("cdc", r"BoardTemperature: degrees C, once a second\."),
@@ -213,7 +227,7 @@ def ports_of(ex):
             used.add(st[1])
         elif st[0] in ("expect", "do"):
             used |= {k for k, _ in st[1 if st[0] == "expect" else 2]}
-        elif st[0] == "range":
+        elif st[0] in ("range", "ymodem"):
             used.add(st[1])
     return used | {"cdc"}
 
@@ -346,6 +360,18 @@ def run_steps(ex, ports, bufs):
                 Fail("%s outside %g..%g" % (values, lo, hi))
                 return 1, ""
             Ok("%s within %g..%g" % (values, lo, hi))
+        elif kind == "ymodem":
+            _, port, name, data = st
+            if not ymodem.send(ports[port], name, data):
+                Fail("YMODEM send of %s did not complete" % name)
+                return 1, ""
+            want = r"SD: wrote %s, %d bytes, crc32=%08X" % (
+                re.escape(name), len(data), zlib.crc32(data))
+            missing = wait_for(ports, bufs, [("cdc", want)], 10.0)
+            if missing:
+                report_missing(missing, bufs, 10.0)
+                return 1, ""
+            Ok("%s on the card, CRC-32 matches" % name)
         elif kind == "discover":
             ip = re.search(r"address (\d+\.\d+\.\d+\.\d+)", bufs["cdc"]).group(1)
             if not wait_for_board(ip, timeout=30.0):
