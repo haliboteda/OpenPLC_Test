@@ -19,3 +19,10 @@ elif request.Offset == 0x18: # D3CR
 else:
     self.WarningLog("Unhandled access to offset 0x{0:X}", request.Offset)
 '''
+
+// The board's ADCs run from VREFBUF at 2.5 V (OPENPLC_VREF_MV), not 3.3 V.
+adc3:
+    referenceVoltage: 2.5
+
+adcM1S2:
+    referenceVoltage: 2.5

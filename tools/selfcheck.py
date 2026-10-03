@@ -6,7 +6,7 @@ the documents have theirs in OpenPLC_Docs (tools/check_docs.py). On-board cases
 are not here -- they need a person or a board; --list names where they live.
 
     python tools/selfcheck.py              run everything
-    python tools/selfcheck.py --quick      skip the slow ones (T1-18 on the bootloader stand-in, T1-37 and T3-05 Renode)
+    python tools/selfcheck.py --quick      skip the slow ones (T1-18 on the bootloader stand-in, T1-37, T3-05 and T3-11 Renode)
     python tools/selfcheck.py --list       say what each step is, run nothing
 
 Exit 0 = all pass, 1 = at least one failed. A check whose prerequisite is absent
@@ -26,10 +26,8 @@ sys.path.insert(0, str(HERE))
 
 from common import (Fail, Ok, Section, Warn, cfg,  # noqa: E402
                     have_cmd, probe, python_exe)
-from flash_bootloader import looks_like_bootloader  # noqa: E402
 
 TESTTOOL = HERE.parent
-BOOT_IMAGE = Path(cfg.BOOT_REPO) / "Debug" / "open_plc_cube_ide.bin"
 results = []
 
 # What each step is, in run order. This is the ONE place the step list lives:
@@ -52,6 +50,7 @@ CATALOG = [
     ("T2-19",        "R2-04",                  "two revocations take effect, a repeat writes nothing (T2-19 T2-20) on the stand-in"),
     ("T1-37",        "R1-39",                  "outputs held low from reset into the app, and the BOR check, in Renode"),
     ("T3-05",        "R3-08",                  "the examples boot through the real bootloader in Renode"),
+    ("T3-11",        "R3-09",                  "the examples do what their headers say, in Renode"),
 ]
 COVERS = {cid: covers for cid, covers, _ in CATALOG}
 
@@ -70,7 +69,7 @@ def print_catalog():
     for cid, covers, name in CATALOG:
         print("  %-*s  covers %-*s  %s" % (width, cid, cov, covers, name))
     print("")
-    print("  %d steps. --quick skips T1-18a-T1-18g, T1-37 and T3-05." % len(CATALOG))
+    print("  %d steps. --quick skips T1-18a-T1-18g, T1-37, T3-05 and T3-11." % len(CATALOG))
     print("  On-board cases (tools/run_*.py, TestCase.exe against a board) are not here:")
     print("  each one's command is in %s." % CRITERIA_DOC)
 
@@ -125,7 +124,7 @@ def run_step(step_id, name, argv, needs=None, cwd=None, indent=0):
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--quick", action="store_true",
-                    help="skip the slow ones (T1-18 on the bootloader stand-in, T1-37 and T3-05 Renode)")
+                    help="skip the slow ones (T1-18 on the bootloader stand-in, T1-37, T3-05 and T3-11 Renode)")
     ap.add_argument("--list", action="store_true", dest="list_only",
                     help="say what each step is and what it covers, run nothing")
     args = ap.parse_args()
@@ -159,7 +158,7 @@ def main():
              [python_exe(), HERE / "check_golden_vectors.py"], cwd=repo)
 
     if args.quick:
-        for cid in ("T1-18a-T1-18g", "T1-22", "T1-38", "T2-05", "T2-19", "T1-37", "T3-05"):
+        for cid in ("T1-18a-T1-18g", "T1-22", "T1-38", "T2-05", "T2-19", "T1-37", "T3-05", "T3-11"):
             record(cid, dict((c, n) for c, _, n in CATALOG)[cid], "SKIP", "--quick")
     else:
         # The board side is the real bootloader built for the PC, which needs
@@ -176,17 +175,13 @@ def main():
         run_step("T1-37", "outputs held low from reset into the app, and the BOR check, in Renode",
                  [python_exe(), TESTTOOL / "host" / "renode" / "boot_outputs.py"],
                  needs=getattr(cfg, "RENODE", "") or "renode")
-        # Debug/ is shared with the fixture build; T3-05 means nothing on that image.
-        not_boot = looks_like_bootloader(BOOT_IMAGE) if BOOT_IMAGE.exists() else "no image built"
-        if not_boot:
-            Section("T3-05  the examples boot through the real bootloader in Renode")
-            Warn("SKIP - %s: %s" % (BOOT_IMAGE, not_boot))
-            record("T3-05", "the examples boot through the real bootloader in Renode", "SKIP",
-                   "$BOOT/Debug/ is not a bootloader: %s" % not_boot)
-        else:
-            run_step("T3-05", "the examples boot through the real bootloader in Renode",
-                     [python_exe(), TESTTOOL / "host" / "renode" / "run.py"],
-                     needs=getattr(cfg, "RENODE", "") or "renode")
+        # Both build their own bootloader from the current $BOOT source.
+        run_step("T3-05", "the examples boot through the real bootloader in Renode",
+                 [python_exe(), TESTTOOL / "host" / "renode" / "run.py"],
+                 needs=getattr(cfg, "RENODE", "") or "renode")
+        run_step("T3-11", "the examples do what their headers say, in Renode",
+                 [python_exe(), TESTTOOL / "host" / "renode" / "behaviour.py"],
+                 needs=getattr(cfg, "RENODE", "") or "renode")
 
     Section("summary")
     width = max(len(r["name"]) for r in results)

@@ -2,8 +2,9 @@
 
     python run.py                   all of them
     python run.py --only CAN        only examples whose name matches
+    python run.py --boot BIN        use this bootloader image instead of building one
 
-Per example: compile it, lay out flash as after a claim and one successful
+Builds the current $BOOT source once. Per example: compile it, lay out flash as after a claim and one successful
 upload (the bootloader, the signed app, a claimed root area, one metadata
 record, the sector-15 marker), run Renode, and judge that the
 bootloader jumped into the app, setup() ran once, loop() is still being entered
@@ -22,13 +23,14 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent.parent / "tools"))
 
-from common import EXE, Fail, Ok, Section, Warn, cfg, get_iap_tool, get_scratch_dir, run_capture  # noqa: E402
-from flash_bootloader import looks_like_bootloader  # noqa: E402
+from build_image import build_copy  # noqa: E402
+from common import EXE, Fail, Ok, Section, cfg, get_iap_tool, get_scratch_dir, run_capture  # noqa: E402
 
 FQBN = ("OpenPLC_Alpha:stm32:OPEN-PLC:pnum=PLC_H743,usb=CDCgen,xusb=FS,"
         "upload_method=ethMethod,knxrole=dual_device")
@@ -52,6 +54,8 @@ RUN_SECONDS = 15
 TAIL_SECONDS = 10
 
 SD_IMAGE_SIZE = 64 << 20
+# Wall clock. A failing command in a Renode script leaves Renode at its prompt for good.
+RENODE_TIMEOUT = 1800
 
 PLATFORM = HERE / "plc_h743.repl"
 
@@ -135,8 +139,11 @@ def run_renode(renode, work, sym, sd_image):
     p = subprocess.Popen([renode, "--disable-gui", "--console", "-e", "include @%s/run.resc" % w],
                          cwd=str(Path(renode).parent), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, text=True, errors="replace")
+    timer = threading.Timer(RENODE_TIMEOUT, p.kill)
+    timer.start()
     out = p.stdout.read()
     p.wait()
+    timer.cancel()
     (work / "console.txt").write_text(out, encoding="utf-8")
     return out
 
@@ -163,12 +170,12 @@ def judge(out, work, app_bin):
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--only", default="")
+    ap.add_argument("--boot", default="", help="a bootloader image to use instead of building $BOOT")
     args = ap.parse_args()
 
     renode = getattr(cfg, "RENODE", "")
     arduino_cli = getattr(cfg, "ARDUINO_CLI", "")
     cli_config = getattr(cfg, "ARDUINO_CLI_CONFIG", "")
-    boot_bin = Path(cfg.BOOT_REPO) / "Debug" / "open_plc_cube_ide.bin"
     tools = Path(cfg.A15) / "packages" / "OpenPLC_Alpha" / "tools"
     nm = sorted(tools.glob("xpack-arm-none-eabi-gcc/*/bin/arm-none-eabi-nm" + EXE))
     iap = get_iap_tool()
@@ -177,7 +184,7 @@ def main():
         (not renode or not Path(renode).exists(), "Renode not found. Set $RENODE in config/machine.py"),
         (not arduino_cli or not Path(arduino_cli).exists(), "arduino-cli not found. Set $ARDUINO_CLI in config/machine.py"),
         (not cli_config or not Path(cli_config).exists(), "arduino-cli config not found at %s" % cli_config),
-        (not boot_bin.exists(), "bootloader image not found at %s -- build the bootloader first" % boot_bin),
+        (args.boot and not Path(args.boot).exists(), "--boot %s not found" % args.boot),
         (not nm, "arm-none-eabi-nm not found under %s" % tools),
     ]
     if any(bad for bad, _ in missing):
@@ -185,13 +192,6 @@ def main():
             if bad:
                 Fail(why)
         return 2
-    # Debug/ holds whichever image was built last. Booting the fixture image as
-    # the bootloader prints nothing and never returns, which reads as a hang.
-    not_boot = looks_like_bootloader(boot_bin)
-    if not_boot:
-        Fail("%s: %s -- rebuild the bootloader (tools/build_image.py) first" % (boot_bin, not_boot))
-        return 2
-
     examples_dir = Path(cfg.CORE_LIVE) / "libraries" / "OpenPLC_Ports" / "examples"
     examples = [d for d in sorted(examples_dir.iterdir())
                 if (d / (d.name + ".ino")).exists() and args.only.lower() in d.name.lower()]
@@ -201,6 +201,11 @@ def main():
 
     # Unique per run: other Renode runs may be going on at the same time.
     root = Path(tempfile.mkdtemp(prefix="renode_t3-05_", dir=str(get_scratch_dir())))
+    # The current source, not whatever $BOOT/Debug last held.
+    boot_bin = Path(args.boot) if args.boot else build_copy(root / "boot")
+    if boot_bin is None:
+        Fail("FAIL - the bootloader does not build; files in %s" % root)
+        return 1
     sd_image = root / "sd.img"
     with open(sd_image, "wb") as f:
         f.truncate(SD_IMAGE_SIZE)
