@@ -64,11 +64,12 @@ class Bench:
             sys.exit(2)
         Path(str(leaf_key) + ".cert").write_text(line + "\n", encoding="utf-8")
 
-    def board(self, state, argv, action, build_dir=None):
+    def board(self, state, argv, action, build_dir=None, lifetime=90):
         """Power the stand-in on `state`, run action() once it serves, power
         it off. Returns (action's result, the board's log)."""
         self.runs += 1
-        tail = ["--state", self.scratch / state, "--lifetime", "90", "--port", self.port] + argv
+        tail = ["--state", self.scratch / state, "--lifetime", str(lifetime),
+                "--port", self.port] + argv
         kw = {} if build_dir is None else {"build_dir": build_dir}
         proc, log, handles = start_stand_in(self.scratch, "%s_%d" % (state, self.runs), tail, **kw)
         if not wait_for_serving(log):

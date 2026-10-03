@@ -6,7 +6,7 @@ the documents have theirs in OpenPLC_Docs (tools/check_docs.py). On-board cases
 are not here -- they need a person or a board; --list names where they live.
 
     python tools/selfcheck.py              run everything
-    python tools/selfcheck.py --quick      skip the slow ones (T1-18 on the bootloader stand-in, T1-37, T3-05 and T3-11 Renode)
+    python tools/selfcheck.py --quick      skip the slow ones (every stand-in case, T1-37, T3-05 and T3-11 Renode)
     python tools/selfcheck.py --list       say what each step is, run nothing
 
 Exit 0 = all pass, 1 = at least one failed. A check whose prerequisite is absent
@@ -48,6 +48,18 @@ CATALOG = [
     ("T1-38",        "R1-40",                  "the version gate: older refused, --force once, on the stand-in"),
     ("T2-05",        "R2-01 R2-02",            "factory reset and what follows it (T2-05 T2-09 T2-36) on the stand-in"),
     ("T2-19",        "R2-04",                  "two revocations take effect, a repeat writes nothing (T2-19 T2-20) on the stand-in"),
+    ("T1-01",        "R1-08 R1-09 R1-12 R1-15 R1-16 R1-17 R1-18 R1-19 R1-22 R1-23",
+     "the protocol Go cases on the stand-in (T1-01 T1-02 T1-05..T1-12 T1-24)"),
+    ("T1-13",        "R1-01 R1-03 R1-25 R1-26 R1-28",
+     "an upload's verify/erase order, slots, a refused upload and a damaged app (T1-13 T1-14 T1-23 T1-26) on the stand-in"),
+    ("T1-28",        "R1-29",                  "a full metadata area is reclaimed, calibration kept, on the stand-in"),
+    ("T1-30",        "R1-35",                  "a leaf cannot replace the bootloader, on the stand-in"),
+    ("T1-32",        "R1-37",                  "a board with no root refuses flashboot, on the stand-in"),
+    ("T2-01",        "R2-02",                  "takeown claims a rootless board, on the stand-in"),
+    ("T2-11",        "R2-02 R2-03",
+     "leaf upload, bad-signature handover, root change (T2-11 T2-03 T2-12 T2-14) on the stand-in"),
+    ("T2-15",        "R2-04",
+     "revocation and getapprevoked, setowner --wipe (T2-15 T2-16 T2-17 T2-25 T2-26) on the stand-in"),
     ("T1-37",        "R1-39",                  "outputs held low from reset into the app, and the BOR check, in Renode"),
     ("T3-05",        "R3-08",                  "the examples boot through the real bootloader in Renode"),
     ("T3-11",        "R3-09",                  "the examples do what their headers say, in Renode"),
@@ -69,7 +81,7 @@ def print_catalog():
     for cid, covers, name in CATALOG:
         print("  %-*s  covers %-*s  %s" % (width, cid, cov, covers, name))
     print("")
-    print("  %d steps. --quick skips T1-18a-T1-18g, T1-37, T3-05 and T3-11." % len(CATALOG))
+    print("  %d steps. --quick skips the stand-in cases, T1-37, T3-05 and T3-11." % len(CATALOG))
     print("  On-board cases (tools/run_*.py, TestCase.exe against a board) are not here:")
     print("  each one's command is in %s." % CRITERIA_DOC)
 
@@ -124,7 +136,7 @@ def run_step(step_id, name, argv, needs=None, cwd=None, indent=0):
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--quick", action="store_true",
-                    help="skip the slow ones (T1-18 on the bootloader stand-in, T1-37, T3-05 and T3-11 Renode)")
+                    help="skip the slow ones (every stand-in case, T1-37, T3-05 and T3-11 Renode)")
     ap.add_argument("--list", action="store_true", dest="list_only",
                     help="say what each step is and what it covers, run nothing")
     args = ap.parse_args()
@@ -158,7 +170,8 @@ def main():
              [python_exe(), HERE / "check_golden_vectors.py"], cwd=repo)
 
     if args.quick:
-        for cid in ("T1-18a-T1-18g", "T1-22", "T1-38", "T2-05", "T2-19", "T1-37", "T3-05", "T3-11"):
+        for cid in ("T1-18a-T1-18g", "T1-22", "T1-38", "T2-05", "T2-19", "T1-01", "T1-13",
+                    "T1-28", "T1-30", "T1-32", "T2-01", "T2-11", "T2-15", "T1-37", "T3-05", "T3-11"):
             record(cid, dict((c, n) for c, _, n in CATALOG)[cid], "SKIP", "--quick")
     else:
         # The board side is the real bootloader built for the PC, which needs
@@ -170,6 +183,11 @@ def main():
         for cid in ("T1-22", "T1-38", "T2-05", "T2-19"):
             run_step(cid, dict((c, n) for c, _, n in CATALOG)[cid],
                      [python_exe(), TESTTOOL / "host" / "fakeboard" / "run_lifecycle.py", "--only", cid],
+                     needs=getattr(cfg, "HOST_CC", "") or "gcc")
+        # Protocol and ownership cases on the stand-in; each step runs its whole group.
+        for cid in ("T1-01", "T1-13", "T1-28", "T1-30", "T1-32", "T2-01", "T2-11", "T2-15"):
+            run_step(cid, dict((c, n) for c, _, n in CATALOG)[cid],
+                     [python_exe(), TESTTOOL / "host" / "fakeboard" / "run_protocol.py", "--only", cid],
                      needs=getattr(cfg, "HOST_CC", "") or "gcc")
         # Builds its own bootloader in a temporary copy, so $BOOT/Debug does not matter here.
         run_step("T1-37", "outputs held low from reset into the app, and the BOR check, in Renode",
