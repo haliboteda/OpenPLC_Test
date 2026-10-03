@@ -5,15 +5,16 @@
     python3 tools/run_journal_reclaim.py --inspect        read and report, change nothing
 
 Filling the area by uploading is not an option: one upload costs 7 slots out of
-3840, so it would take about 548 uploads and most of a day. This fills it
+3583, so it would take about 511 uploads and most of a day. This fills it
 directly instead, then drives one real upload and watches for the reclaim.
 
 HOW THE SECTOR IS FILLED, AND WHY NOT BY ERASING IT
 
-The sector holds the current firmware metadata -- app size, SHA-256, signature
-and certificate -- which cannot be forged here. So the existing content is read
-back first and kept verbatim; synthetic log records are appended after it. The
-board keeps its application, and only the free space changes.
+The sector holds the calibration, the board's root area and the current
+firmware metadata -- none of which can be forged here. So the existing content
+is read back first and kept verbatim; synthetic log records are appended after
+the metadata. The board keeps its owner and its application, and only the free
+space changes.
 
 The whole 128K is then written as one image, because STM32_Programmer_CLI erases
 a sector before writing into it. Writing only the appended part would erase the
@@ -27,8 +28,8 @@ and a record it cannot read is what makes it declare the area unusable -- which
 is the state R1-29 is about.
 
 Criteria:
-    ** Metadata area full - the next successful update reclaims it. **  fill took
-    Reclaiming metadata area (<n> slots discarded)                      reclaim ran
+    ** Metadata area full - the next successful update reclaims sector 15. **  fill took
+    Reclaiming sector 15 (<n> metadata slots, root area compacted)             reclaim ran
     the board boots its application afterwards                          it recovered
 
 Exit 0 = R1-29 holds, 1 = it does not, 2 = the run could not be set up.
@@ -47,24 +48,24 @@ from common import (cfg, Section, Ok, Warn, Fail, close_ports,  # noqa: E402
                     get_programmer_cli, get_scratch_file, open_log_ports,
                     python_exe, read_log_ports)
 
-# Sector 15 is split since 2026-09-21: the first 8 KiB is calibration data,
-# the metadata area starts after it. Erasing still takes the whole sector, so
-# SECTOR_ADDR is what gets erased while METADATA_ADDR is what gets counted.
-# See $PROD/docs/modules/M1/SECTOR-15.md and DECISIONS.md #61.
+# Sector 15: calibration 8 KiB, root area 8 KiB, metadata, and a completion
+# marker in the last 32 bytes. The programmer erases the whole sector, so every
+# part is read back and written back; only the metadata area is filled.
+# Layout from $BOOT/IAPServer/bootloader_state.c and $PROD/docs/modules/M1/SECTOR-15.md.
 SECTOR_ADDR = 0x081E0000
 SECTOR_BYTES = 0x20000
-CALIB_BYTES = 0x2000
-STATE_ADDR = SECTOR_ADDR + CALIB_BYTES
+META_OFFSET = 0x4000
 SLOT = 32
-METADATA_BYTES = SECTOR_BYTES - CALIB_BYTES
+MARKER_BYTES = SLOT
+METADATA_BYTES = SECTOR_BYTES - META_OFFSET - MARKER_BYTES
 TOTAL_SLOTS = METADATA_BYTES // SLOT
 
 REC_BLANK = 0xFF
 REC_LOG = 0x4C
 
 EVT_UPDATE_OK = 1
-JOURNAL_FULL = "** Metadata area full - the next successful update reclaims it."
-RECLAIMING = "Reclaiming metadata area"
+JOURNAL_FULL = "** Metadata area full - the next successful update reclaims sector 15."
+RECLAIMING = "Reclaiming sector 15"
 APP_MOD = "** APP Mod"
 
 
@@ -109,14 +110,9 @@ def fill(data, leave_free):
 
 
 def read_sector(cli, path):
-    """The WHOLE sector, calibration bytes included.
-
-    Not just the metadata half, even though that is all this case fills:
-    STM32_Programmer_CLI erases the whole 128 KiB sector before writing any
-    part of it, so writing back only the metadata half destroys the
-    calibration area -- which is exactly what the carry-over this case is
-    supposed to be able to observe. Read it all, put it all back.
-    """
+    """The WHOLE sector: STM32_Programmer_CLI erases all 128 KiB before writing
+    any part, so whatever is not written back -- calibration, root, marker -- is
+    gone."""
     r = subprocess.run([cli, "-c", "port=SWD", "mode=UR", "-r",
                         hex(SECTOR_ADDR), hex(SECTOR_BYTES), str(path)],
                        capture_output=True, text=True, timeout=180)
@@ -128,9 +124,8 @@ def main():
     ap.add_argument("--bin", help="signed application image for the upload that triggers the reclaim")
     ap.add_argument("--key",
                     help="owner private key this board is claimed for. Without "
-                         "it IAPTool signs with the published root, a claimed "
-                         "board refuses the upload, and the reclaim this case "
-                         "is about never happens.")
+                         "it the board refuses the upload, and the reclaim this "
+                         "case is about never happens.")
     ap.add_argument("--ip", default=None)
     ap.add_argument("--ports", action="append")
     ap.add_argument("--leave", type=int, default=4,
@@ -149,7 +144,9 @@ def main():
         Fail("could not read the state sector over SWD")
         return 2
     sector = raw.read_bytes()
-    calib, data = sector[:CALIB_BYTES], sector[CALIB_BYTES:]
+    head = sector[:META_OFFSET]
+    data = sector[META_OFFSET:META_OFFSET + METADATA_BYTES]
+    tail = sector[META_OFFSET + METADATA_BYTES:]
     if len(data) != METADATA_BYTES:
         Fail("read %d bytes, expected %d" % (len(data), METADATA_BYTES))
         return 2
@@ -171,12 +168,9 @@ def main():
         Ok("appended %d synthetic log records, leaving %d free" % (added, args.leave))
 
     out = Path(get_scratch_file("journal_filled.bin"))
-    out.write_bytes(calib + filled)
+    out.write_bytes(head + filled + tail)
 
     Section("writing it back")
-    # One image for the whole sector, calibration bytes and all: the programmer
-    # erases the whole sector before writing any part of it, so anything left
-    # out of this image is gone.
     w = subprocess.run([cli, "-c", "port=SWD", "mode=UR", "-w", str(out),
                         hex(SECTOR_ADDR), "-rst"],
                        capture_output=True, text=True, timeout=300)
@@ -223,7 +217,7 @@ def main():
 
     post = Path(get_scratch_file("journal_after.bin"))
     if read_sector(cli, post):
-        used_after, _ = scan(post.read_bytes()[CALIB_BYTES:])
+        used_after, _ = scan(post.read_bytes()[META_OFFSET:META_OFFSET + METADATA_BYTES])
         Ok("journal after the reclaim: %d/%d slots used" % (used_after, TOTAL_SLOTS))
 
     if APP_MOD in after_text:

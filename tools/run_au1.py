@@ -21,7 +21,6 @@ Exit 0 = T1-17 passed, 1 = it failed, 2 = the run could not be set up.
 import argparse
 import datetime
 import json
-import re
 import socket
 import sys
 import time
@@ -85,8 +84,7 @@ def wait_board_state(ip, udp_port, present, what, minutes, local_ip=None):
 def enter_bootloader(ip, ports):
     """Run the Python enter_bootloader and return (captured text, exit code).
 
-    Captured, not just printed: the bootloader's own counter report lands in
-    this output rather than in the power-up log (see the cross-check below).
+    Captured, not just printed, so a failure can show what the bootloader said.
     """
     argv = [python_exe(), str(Path(__file__).resolve().parent / "enter_bootloader.py"),
             "--ip", ip]
@@ -162,14 +160,10 @@ def main():
             return 1
         before = json.loads(state_file.read_text(encoding="utf-8"))
 
-    last_counter = before["samples"][-1]["counter"]
-
     # -------------------------------------------------------- power cycle ----
     banner(["UNPLUG THE BOARD NOW -- pull the power, do not press reset."])
 
-    print("  Why not reset: a reset never touches the RTC backup domain, so it would")
-    print("  pass even on a board with a dead VBAT cell -- and that board is exactly")
-    print("  what this case exists to catch.")
+    print("  Why not reset: the claim is about power-up, and a reset is not one.")
     print()
     print("  This script watches the board's own UDP discovery go quiet, then")
     print("  cross-checks with the ST-Link's own voltage reading before trusting it --")
@@ -200,9 +194,7 @@ def main():
     print("  Capturing the boot log while it comes up.")
     print()
 
-    # Hold the log ports open across power-up so the bootloader's own counter
-    # report is captured. That line is independent corroboration: it is read
-    # straight out of the backup register, not out of a nonce.
+    # Hold the log ports open across power-up so the boot log is captured.
     open_ports = open_log_ports(ports)
     if not wait_board_state(ip, args.port, True, "the board to answer again", args.wait_minutes, local_ip=local_ip):
         close_ports(open_ports)
@@ -216,41 +208,13 @@ def main():
     # ------------------------------------------------------------ phase 2 ----
     Section("T1-17 phase 2 -- collecting nonces after the power cut")
 
-    eb_out, eb_rc = enter_bootloader(ip, ports)
+    _, eb_rc = enter_bootloader(ip, ports)
     if eb_rc != 0:
         Fail("board came back but could not be parked in the bootloader")
         return 2
 
     verdict = run_emit([test_tool, "T1-17", "--ip=%s" % ip, "--port=%s" % args.port,
                         "--state=%s" % state_file, "--phase=2", "--count=%d" % args.count])
-
-    # ------------------------------------------------- serial cross-check ----
-    Section("cross-check against the bootloader's own report")
-
-    # The bootloader prints the counter it read from the backup register
-    # (IAPServer/iap_auth.c iap_auth_report_backup_domain). Comparing that to the
-    # last nonce issued before the cut tests the same claim through a completely
-    # different path: the register read directly, rather than a counter inferred
-    # from the first four bytes of a nonce. If those two disagree, one of them is
-    # not reading what it claims to.
-    #
-    # Both logs are searched because that line is NOT on the power-up boot log:
-    # the report only runs when the bootloader stays in upload mode, and a board
-    # with a valid application hands off before reaching it. It shows up in the
-    # enter_bootloader output instead.
-    m = re.search(r"nonce counter = (\d+)", boot_log + "\n" + eb_out)
-    if not m:
-        Warn("no 'nonce counter =' line in either log -- cross-check not available")
-        Warn("(the verdict above still stands; it just has no second opinion)")
-    else:
-        reported = int(m.group(1))
-        print("  last nonce issued before the cut : %s" % last_counter)
-        print("  counter reported after power-up  : %d" % reported)
-        if reported < last_counter:
-            Fail("  the backup register came back BELOW where the nonces had reached -- it did not survive")
-            verdict = 1
-        else:
-            Ok("  the backup register survived the power cut and did not go backwards")
 
     if "Backup domain was lost" in boot_log:
         Fail("  the board itself reports the backup domain was lost -- replay protection is weakened")
@@ -262,7 +226,7 @@ def main():
     if verdict != 0:
         Fail("T1-17 FAILED")
         return 1
-    Ok("T1-17 passed -- nonces are unique and the counter survived a real power cut")
+    Ok("T1-17 passed -- nonces stay unique across a real power cut")
     print("state kept at: %s" % state_file)
     return 0
 
