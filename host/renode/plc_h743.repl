@@ -1,0 +1,21 @@
+// Renode's STM32H743 platform with the model gaps the bootloader trips over.
+// $PROD/maps/renode-simulation/REN-02-findings.md lists them.
+using "platforms/cpus/stm32h743.repl"
+
+// As in stm32h7.repl, plus CR2: BREN and BRRDY set, so HAL_PWREx_EnableBkUpReg()
+// in bkp_stash_enable() does not wait out its 1 s timeout on every boot.
+pwr:
+    script: '''
+if request.Offset == 0x00: # CR1
+    request.Value = 0xF000C100
+elif request.Offset == 0x04: # CSR1
+    request.Value = 0x6000
+elif request.Offset == 0x08: # CR2
+    request.Value = 0x10001
+elif request.Offset == 0x0C: # CR3
+    request.Value = 0x4000000
+elif request.Offset == 0x18: # D3CR
+    request.Value = 0x2000
+else:
+    self.WarningLog("Unhandled access to offset 0x{0:X}", request.Offset)
+'''

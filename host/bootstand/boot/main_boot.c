@@ -1,7 +1,7 @@
 /*
  * One boot of the bootloader half: the same calls, in the same order, as the
- * bootloader path of $BOOT/Core/Src/main.c, with the boot window's BOOT0 read
- * as "not pressed". Ends by exiting: HOST_EXIT_RESET when the firmware resets,
+ * bootloader path of $BOOT/Core/Src/main.c, with the boot window's BOOT0 gesture
+ * taken from --gesture. Ends by exiting: HOST_EXIT_RESET when the firmware resets,
  * HOST_EXIT_APP when it would jump to the application.
  */
 
@@ -72,7 +72,13 @@ int main(int argc, char **argv)
 		}
 	}
 
-	IAP_Method mode = server_decide(0U);
+	/* The boot window, as $BOOT/Core/Src/main.c handles its gesture: a factory
+	 * reset before server_decide() scans the owner slot, and either gesture
+	 * keeps the board in the bootloader. */
+	if (host_args.gesture == HOST_GESTURE_FACTORY) {
+		(void)owner_slot_factory_reset(true);
+	}
+	IAP_Method mode = server_decide((host_args.gesture == HOST_GESTURE_NONE) ? 0U : 1U);
 	print_root();
 	if (mode == IAP_NONE) {
 		server_jump_to_app();   /* exits with HOST_EXIT_APP */

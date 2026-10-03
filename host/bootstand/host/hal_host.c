@@ -104,6 +104,19 @@ void HAL_RTCEx_BKUPWrite(RTC_HandleTypeDef *h, uint32_t reg, uint32_t v) { (void
 HAL_StatusTypeDef HAL_FLASH_Unlock(void) { return HAL_OK; }
 HAL_StatusTypeDef HAL_FLASH_Lock(void) { return HAL_OK; }
 
+/* An injected power cut right after the Nth erase / program of this boot. The
+ * flash is a mapped file, so what was written so far stays, as on the chip. */
+static void maybe_cut(uint32_t *count, uint32_t limit, const char *what)
+{
+	if ((limit != 0U) && (++*count == limit)) {
+		host_log("power cut after %s #%u", what, (unsigned)limit);
+		host_exit(HOST_EXIT_POWER);
+	}
+}
+
+static uint32_t s_erases;
+static uint32_t s_programs;
+
 HAL_StatusTypeDef HAL_FLASHEx_Erase(FLASH_EraseInitTypeDef *init, uint32_t *sector_error)
 {
 	uint32_t base = HOST_FLASH_BASE + (init->Banks == FLASH_BANK_2 ? BANK_SIZE : 0U);
@@ -113,6 +126,7 @@ HAL_StatusTypeDef HAL_FLASHEx_Erase(FLASH_EraseInitTypeDef *init, uint32_t *sect
 		return HAL_ERROR;
 	}
 	memset((void *)(uintptr_t)(base + init->Sector * SECTOR_SIZE), 0xFF, init->NbSectors * SECTOR_SIZE);
+	maybe_cut(&s_erases, host_args.fail_after_erase, "erase");
 	return HAL_OK;
 }
 
@@ -130,6 +144,7 @@ HAL_StatusTypeDef HAL_FLASH_Program(uint32_t type, uint32_t address, uint32_t da
 		}
 	}
 	memcpy(dst, (const void *)(uintptr_t)data_address, 32U);
+	maybe_cut(&s_programs, host_args.fail_after_program, "program");
 	return HAL_OK;
 }
 

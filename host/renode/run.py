@@ -21,6 +21,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -51,6 +52,8 @@ RUN_SECONDS = 15
 TAIL_SECONDS = 10
 
 SD_IMAGE_SIZE = 64 << 20
+
+PLATFORM = HERE / "plc_h743.repl"
 
 
 def symbols(nm, elf):
@@ -101,7 +104,7 @@ def run_renode(renode, work, sym, sd_image):
     loop = sym["loop"]
     lines = [
         'mach create "plc"',
-        "machine LoadPlatformDescription @platforms/cpus/stm32h743.repl",
+        "machine LoadPlatformDescription @%s" % PLATFORM.as_posix(),
         # The platform fills the UID with random words; pin it to RENODE_UID.
         "sysbus WriteDoubleWord 0x1FF1E800 0",
         "sysbus WriteDoubleWord 0x1FF1E804 0",
@@ -196,9 +199,8 @@ def main():
         Fail("no examples under %s match '%s'" % (examples_dir, args.only))
         return 2
 
-    root = get_scratch_dir() / "renode_t3-05"
-    shutil.rmtree(str(root), ignore_errors=True)
-    root.mkdir(parents=True)
+    # Unique per run: other Renode runs may be going on at the same time.
+    root = Path(tempfile.mkdtemp(prefix="renode_t3-05_", dir=str(get_scratch_dir())))
     sd_image = root / "sd.img"
     with open(sd_image, "wb") as f:
         f.truncate(SD_IMAGE_SIZE)
@@ -231,6 +233,7 @@ def main():
     if failed:
         Fail("failed: " + ", ".join(failed))
         return 1
+    shutil.rmtree(str(root), ignore_errors=True)
     Ok("every example boots and keeps looping")
     return 0
 

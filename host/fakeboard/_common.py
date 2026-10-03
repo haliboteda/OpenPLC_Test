@@ -130,7 +130,7 @@ def fixed_bytes(n, step, offset):
 
 
 
-def build_stand_in():
+def build_stand_in(build_dir=STAND_IN_BUILD, defines=()):
     """Configures and builds the stand-in from the bootloader and board package
     repos named in config/machine.py. Exits 2 when that is not possible, since
     no case can run without it.
@@ -146,11 +146,11 @@ def build_stand_in():
         Fail("cmake or HOST_CC not found - the stand-in cannot be built")
         sys.exit(2)
     gen = ["-G", "Ninja"] if shutil.which("ninja", path=env["PATH"]) else []
-    configure = [cmake, "-S", str(STAND_IN), "-B", str(STAND_IN_BUILD)] + gen + [
+    configure = [cmake, "-S", str(STAND_IN), "-B", str(build_dir)] + gen + list(defines) + [
         "-DCMAKE_C_COMPILER=%s" % host_cc,
         "-DBOOT_ROOT=%s" % Path(cfg.BOOT_REPO).as_posix(),
         "-DCORE_ROOT=%s" % Path(cfg.CORE_REPO).as_posix()]
-    for argv in (configure, [cmake, "--build", str(STAND_IN_BUILD)]):
+    for argv in (configure, [cmake, "--build", str(build_dir)]):
         proc = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               text=True, errors="replace")
         if proc.returncode != 0:
@@ -159,7 +159,7 @@ def build_stand_in():
             sys.exit(2)
 
 
-def start_stand_in(scratch, case_id, argv_tail):
+def start_stand_in(scratch, case_id, argv_tail, build_dir=STAND_IN_BUILD):
     """Launch the stand-in with its output captured to a log file.
 
     Returns (process, log path, open file handles). Its state (flash, RAMs)
@@ -168,7 +168,7 @@ def start_stand_in(scratch, case_id, argv_tail):
     log = scratch / ("board_%s.log" % case_id)
     out_fh = open(str(log), "wb")
     err_fh = open(str(log) + ".err", "wb")
-    argv = [python_exe(), str(STAND_IN / "bootstand.py"), "--build", str(STAND_IN_BUILD)]
+    argv = [python_exe(), str(STAND_IN / "bootstand.py"), "--build", str(build_dir)]
     tail = [str(a) for a in argv_tail]
     if "--state" not in tail:
         argv += ["--state", str(scratch / ("state_%s" % case_id))]

@@ -11,6 +11,7 @@ Exit 0 = built and fits, 1 = build failed or the image is too big, 2 = setup.
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -53,12 +54,15 @@ def flash_limit():
     return int(m.group(1)) * 1024
 
 
-def build():
+def build(project=None, workspace=None):
+    """Builds $BOOT in place, or the copy at project in its own workspace."""
     Section("Build: bootloader")
 
     argv = [str(get_cube_ide_exe()), "--launcher.suppressErrors", "-nosplash",
             "-application", "org.eclipse.cdt.managedbuilder.core.headlessbuild",
-            "-data", str(cfg.WORKSPACE)]
+            "-data", str(workspace or cfg.WORKSPACE)]
+    if project:
+        argv += ["-import", str(project)]
     # Clean: Debug/ may hold fixture objects, and make cannot see the macro moved.
     argv += ["-cleanBuild", PROJECT]
 
@@ -116,7 +120,7 @@ def build():
     else:
         Ok("0 errors, %s warning(s) - as expected" % warnings)
 
-    binary = Path(cfg.BOOT_REPO) / "Debug" / "open_plc_cube_ide.bin"
+    binary = Path(project or cfg.BOOT_REPO) / "Debug" / "open_plc_cube_ide.bin"
     if not binary.exists():
         Fail("no .bin at %s" % binary)
         return None
@@ -129,6 +133,24 @@ def build():
     Ok("bootloader: %d bytes, %d to spare in the %d-byte region" %
        (size, limit - size, limit))
     return size
+
+
+def build_copy(dest):
+    """Builds $BOOT's working tree in a copy under dest; $BOOT/Debug is left alone.
+
+    Returns the .bin path, or None if the build failed.
+    """
+    files = subprocess.run(["git", "-C", str(cfg.BOOT_REPO), "ls-files", "-z", "-co", "--exclude-standard"],
+                           stdout=subprocess.PIPE, check=True).stdout.decode("utf-8").split("\0")
+    project = Path(dest) / "open_plc_cube_ide"
+    for name in filter(None, files):
+        src = Path(cfg.BOOT_REPO) / name
+        if src.is_file():
+            (project / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src), str(project / name))
+    if build(project, Path(dest) / "workspace") is None:
+        return None
+    return project / "Debug" / "open_plc_cube_ide.bin"
 
 
 def main():

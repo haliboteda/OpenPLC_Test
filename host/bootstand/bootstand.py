@@ -9,11 +9,16 @@ $PROD/docs/engineering/BOOTLOADER-STAND-IN.md.
     python bootstand.py --state DIR [--fresh] [--root HEX128]
                         [--port N] [--discovery-port N] [--uid HEX24]
                         [--lifetime SECONDS] [--boot-window SECONDS]
+                        [--gesture none|upload|factory]
+                        [--fail-after-erase N] [--fail-after-program N]
 
   --fresh          start from erased flash and empty RAMs (a factory board)
   --root           setup only: claim the board for this public key on the first
                    boot, as a takeown would
   --boot-window    silence before each boot, the board's 2 s BOOT0 window
+  --gesture        BOOT0 held through the first boot's window
+  --fail-after-*   cut power right after the Nth flash erase / program of a
+                   boot; the next boot is cold and runs without the fault
 
 Exits when --lifetime runs out or a half crashes. Killing this process kills
 the running half with it (a job object on Windows, a process group elsewhere).
@@ -32,6 +37,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 EXIT_RESET = 3
 EXIT_APP = 4
+EXIT_POWER = 5
 
 
 def log(msg):
@@ -102,6 +108,9 @@ def main():
     ap.add_argument("--uid")
     ap.add_argument("--lifetime", type=float, default=60.0)
     ap.add_argument("--boot-window", type=float, default=2.0)
+    ap.add_argument("--gesture", choices=("none", "upload", "factory"), default="none")
+    ap.add_argument("--fail-after-erase", default="0")
+    ap.add_argument("--fail-after-program", default="0")
     args = ap.parse_args()
 
     state = Path(args.state)
@@ -116,7 +125,9 @@ def main():
     job = kill_with_me()
     popen_kw = {} if sys.platform == "win32" else {"start_new_session": True}
     deadline = time.time() + args.lifetime
-    half, cold = "boot", True
+    half, cold, first = "boot", True, True
+    faults = ["--fail-after-erase", args.fail_after_erase,
+              "--fail-after-program", args.fail_after_program]
     child = None
     try:
         while time.time() < deadline:
@@ -125,11 +136,14 @@ def main():
                 argv = [exe("bootstand_boot", args.build)] + common
                 if cold:
                     argv.append("--cold")
+                if first:
+                    argv += ["--gesture", args.gesture]
                     if args.root:
                         argv += ["--claim", args.root]
+                argv += faults
             else:
                 argv = [exe("bootstand_app", args.build)] + common
-            cold = False
+            cold = first = False
             child = subprocess.Popen(argv, **popen_kw)
             adopt(job, child)
             while child.poll() is None and time.time() < deadline:
@@ -141,6 +155,8 @@ def main():
                 half = "boot"
             elif rc == EXIT_APP:
                 half = "app"
+            elif rc == EXIT_POWER:
+                half, cold, faults = "boot", True, []
             else:
                 log("%s half exited with %d" % (half, rc))
                 return 1

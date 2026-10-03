@@ -23,12 +23,16 @@ static LONG WINAPI on_crash(EXCEPTION_POINTERS *e)
 #include <unistd.h>
 #endif
 
-host_args_t host_args = { ".", 61865, 0, { 0x39333639U, 0x31325110U, 0x00330034U }, false, false, NULL };
+host_args_t host_args = {
+	.state_dir = ".", .port = 61865, .uid = { 0x39333639U, 0x31325110U, 0x00330034U },
+	.gesture = HOST_GESTURE_NONE,
+};
 
 static void usage(void)
 {
 	fprintf(stderr, "usage: --state DIR [--port N] [--discovery-port N] [--uid HEX24] [--cold]"
-			" [--claim HEX128]\n");
+			" [--claim HEX128] [--gesture none|upload|factory]"
+			" [--fail-after-erase N] [--fail-after-program N]\n");
 	exit(2);
 }
 
@@ -77,6 +81,21 @@ void host_parse_args(int argc, char **argv)
 			host_args.cold = true;
 		} else if (strcmp(a, "--claim") == 0 && v) {
 			host_args.claim_hex = v; i++;
+		} else if (strcmp(a, "--gesture") == 0 && v) {
+			if (strcmp(v, "none") == 0) {
+				host_args.gesture = HOST_GESTURE_NONE;
+			} else if (strcmp(v, "upload") == 0) {
+				host_args.gesture = HOST_GESTURE_UPLOAD;
+			} else if (strcmp(v, "factory") == 0) {
+				host_args.gesture = HOST_GESTURE_FACTORY;
+			} else {
+				usage();
+			}
+			i++;
+		} else if (strcmp(a, "--fail-after-erase") == 0 && v) {
+			host_args.fail_after_erase = (uint32_t)strtoul(v, NULL, 10); i++;
+		} else if (strcmp(a, "--fail-after-program") == 0 && v) {
+			host_args.fail_after_program = (uint32_t)strtoul(v, NULL, 10); i++;
 		} else {
 			usage();
 		}
