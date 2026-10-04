@@ -6,7 +6,7 @@ the documents have theirs in OpenPLC_Docs (tools/check_docs.py). On-board cases
 are not here -- they need a person or a board; --list names where they live.
 
     python tools/selfcheck.py              run everything
-    python tools/selfcheck.py --quick      skip the slow ones (every stand-in case, T1-37, T3-05 and T3-11 Renode)
+    python tools/selfcheck.py --quick      skip the slow ones (every stand-in case, T1-27, T1-37, T3-05 and T3-11 Renode)
     python tools/selfcheck.py --list       say what each step is, run nothing
 
 Exit 0 = all pass, 1 = at least one failed. A check whose prerequisite is absent
@@ -61,6 +61,8 @@ CATALOG = [
     ("T2-15",        "R2-04",
      "revocation and getapprevoked, setowner --wipe (T2-15 T2-16 T2-17 T2-25 T2-26) on the stand-in"),
     ("T1-37",        "R1-39",                  "outputs held low from reset into the app, and the BOR check, in Renode"),
+    ("T1-27",        "R1-04 R1-05",
+     "BOOT0 held -> upload mode; a CDC request leaves lwIP down (T1-27 T1-25), in Renode"),
     ("T3-05",        "R3-08",                  "the examples boot through the real bootloader in Renode"),
     ("T3-11",        "R3-09",                  "the examples do what their headers say, in Renode"),
 ]
@@ -81,7 +83,7 @@ def print_catalog():
     for cid, covers, name in CATALOG:
         print("  %-*s  covers %-*s  %s" % (width, cid, cov, covers, name))
     print("")
-    print("  %d steps. --quick skips the stand-in cases, T1-37, T3-05 and T3-11." % len(CATALOG))
+    print("  %d steps. --quick skips the stand-in cases, T1-27, T1-37, T3-05 and T3-11." % len(CATALOG))
     print("  On-board cases (tools/run_*.py, TestCase.exe against a board) are not here:")
     print("  each one's command is in %s." % CRITERIA_DOC)
 
@@ -136,7 +138,7 @@ def run_step(step_id, name, argv, needs=None, cwd=None, indent=0):
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--quick", action="store_true",
-                    help="skip the slow ones (every stand-in case, T1-37, T3-05 and T3-11 Renode)")
+                    help="skip the slow ones (every stand-in case, T1-27, T1-37, T3-05 and T3-11 Renode)")
     ap.add_argument("--list", action="store_true", dest="list_only",
                     help="say what each step is and what it covers, run nothing")
     args = ap.parse_args()
@@ -171,7 +173,7 @@ def main():
 
     if args.quick:
         for cid in ("T1-18a-T1-18g", "T1-22", "T1-38", "T2-05", "T2-19", "T1-01", "T1-13",
-                    "T1-28", "T1-30", "T1-32", "T2-01", "T2-11", "T2-15", "T1-37", "T3-05", "T3-11"):
+                    "T1-28", "T1-30", "T1-32", "T2-01", "T2-11", "T2-15", "T1-37", "T1-27", "T3-05", "T3-11"):
             record(cid, dict((c, n) for c, _, n in CATALOG)[cid], "SKIP", "--quick")
     else:
         # The board side is the real bootloader built for the PC, which needs
@@ -192,6 +194,9 @@ def main():
         # Builds its own bootloader in a temporary copy, so $BOOT/Debug does not matter here.
         run_step("T1-37", "outputs held low from reset into the app, and the BOR check, in Renode",
                  [python_exe(), TESTTOOL / "host" / "renode" / "boot_outputs.py"],
+                 needs=getattr(cfg, "RENODE", "") or "renode")
+        run_step("T1-27", dict((c, n) for c, _, n in CATALOG)["T1-27"],
+                 [python_exe(), TESTTOOL / "host" / "renode" / "boot_entry.py"],
                  needs=getattr(cfg, "RENODE", "") or "renode")
         # Both build their own bootloader from the current $BOOT source.
         run_step("T3-05", "the examples boot through the real bootloader in Renode",
