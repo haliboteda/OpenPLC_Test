@@ -21,8 +21,8 @@ signed by the root it does trust. So the run ends with a real upload using
 That means THIS SCRIPT INSTALLS AN APPLICATION -- the one passed as --bin.
 
 ⚠️ PRECONDITION -- the board must NOT trust the key passed as --old-key any
-more, i.e. the root change has already happened and the rebuilt bootloader is
-on the board. Checked by asking the board for its root over TCP and comparing.
+more, i.e. setowner has already moved it to a new root (decision 72). Checked
+by asking the board for its root over TCP and comparing.
 Not met -> SETUP (exit 2), not FAIL.
 
 ⚠️ BLIND SPOT, stated because a green result would otherwise be read wider than
