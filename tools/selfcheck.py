@@ -175,7 +175,11 @@ def main():
         for cid in ("T1-18a-T1-18g", "T1-22", "T1-38", "T2-05", "T2-19", "T1-01", "T1-13",
                     "T1-28", "T1-30", "T1-32", "T2-01", "T2-11", "T2-15", "T1-37", "T1-27", "T3-05", "T3-11"):
             record(cid, dict((c, n) for c, _, n in CATALOG)[cid], "SKIP", "--quick")
-    else:
+    elif sys.platform != "win32":
+        for cid in ("T1-18a-T1-18g", "T1-22", "T1-38", "T2-05", "T2-19", "T1-01", "T1-13",
+                    "T1-28", "T1-30", "T1-32", "T2-01", "T2-11", "T2-15"):
+            record(cid, dict((c, n) for c, _, n in CATALOG)[cid], "SKIP", "stand-in is Windows only (decision 143)")
+    if not args.quick and sys.platform == "win32":
         # The board side is the real bootloader built for the PC, which needs
         # the host compiler (run_cases.py builds it).
         run_step("T1-18a-T1-18g", "IAPTool key/certificate match and first-upload claim against a stand-in board",
@@ -191,6 +195,7 @@ def main():
             run_step(cid, dict((c, n) for c, _, n in CATALOG)[cid],
                      [python_exe(), TESTTOOL / "host" / "fakeboard" / "run_protocol.py", "--only", cid],
                      needs=getattr(cfg, "HOST_CC", "") or "gcc")
+    if not args.quick:
         # Builds its own bootloader in a temporary copy, so $BOOT/Debug does not matter here.
         run_step("T1-37", "outputs held low from reset into the app, and the BOR check, in Renode",
                  [python_exe(), TESTTOOL / "host" / "renode" / "boot_outputs.py"],

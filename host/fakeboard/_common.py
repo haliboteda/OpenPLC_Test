@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -31,6 +32,9 @@ STAND_IN_BUILD = STAND_IN / "build"
 # development PC, airtcp binds 56865/TCP). The staged IAPTool is given the same
 # port, so the two cannot drift. See HOW-TO-RUN-TESTS.md, host/fakeboard.
 TEST_PORT = "61865"
+# Tried in order when TEST_PORT cannot be bound. Below Windows' dynamic range
+# (49152+), where winnat's excluded ranges live; never 56865 (airtcp).
+FALLBACK_PORTS = ("47865", "43865", "38865")
 # The board package's discovery tool always asks this UDP port
 # ($CORE_REPO/tools/discovery/network_discovery.go, discoveryPort).
 DISCOVERY_PORT = "56865"
@@ -43,24 +47,20 @@ def parse_pubkey(text):
 
 
 def isolated_env(scratch):
-    """An environment whose user config dir is inside scratch, so the tool never
-    reads or writes the real user's key at the default location."""
+    """An environment whose user config dir and temp dir (Go's os.TempDir(),
+    where the upload lock lives) are inside scratch, so the tool never reads or
+    writes the real user's key or lock."""
     home = scratch / "userhome"
     home.mkdir(exist_ok=True)
-    return dict(os.environ, APPDATA=str(home), XDG_CONFIG_HOME=str(home),
-                HOME=str(home))
+    tmp = scratch / "tmp"
+    tmp.mkdir(exist_ok=True)
+    return dict(os.environ, APPDATA=str(home), HOME=str(home), TEMP=str(tmp), TMP=str(tmp))
 
 
 def user_key_path(env):
     """Where IAPTool looks for, and generates, its default key under env
     (Go's os.UserConfigDir()/openplc/keys/fw_signing_key.pem)."""
-    if sys.platform == "win32":
-        base = Path(env["APPDATA"])
-    elif sys.platform == "darwin":
-        base = Path(env["HOME"]) / "Library" / "Application Support"
-    else:
-        base = Path(env["XDG_CONFIG_HOME"])
-    return base / "openplc" / "keys" / "fw_signing_key.pem"
+    return Path(env["APPDATA"]) / "openplc" / "keys" / "fw_signing_key.pem"
 
 
 def run_env(argv, env, cwd=None):
@@ -72,9 +72,39 @@ def run_env(argv, env, cwd=None):
     return proc.stdout or "", proc.returncode
 
 
+def _bind_error(port):
+    """Why port cannot be bound as host/lwip_bridge.c binds it, or None."""
+    for kind in (socket.SOCK_DGRAM, socket.SOCK_STREAM):
+        s = socket.socket(socket.AF_INET, kind)
+        try:
+            if kind == socket.SOCK_STREAM:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("0.0.0.0", int(port)))
+        except OSError as e:
+            return "%s error %s" % ("UDP" if kind == socket.SOCK_DGRAM else "TCP",
+                                    getattr(e, "winerror", None) or e.errno)
+        finally:
+            s.close()
+    return None
+
+
 def resolve_port():
-    """The port the stand-in serves and the staged IAPTool dials."""
-    return TEST_PORT
+    """The port the stand-in serves and the staged IAPTool dials for this run:
+    TEST_PORT, else the first FALLBACK_PORTS entry that binds. Exits 2 when none
+    does, since the stand-in would fail quietly and every case report "app not
+    started". See HOW-TO-RUN-TESTS.md, host/fakeboard."""
+    why = _bind_error(TEST_PORT)
+    if why is None:
+        return TEST_PORT
+    for port in FALLBACK_PORTS:
+        if _bind_error(port) is None:
+            print("stand-in port: using %s, %s cannot be bound (%s; on Windows often an "
+                  "excluded range)" % (port, TEST_PORT, why))
+            return port
+    Fail("cannot bind %s or any of %s for the stand-in (%s); on Windows see "
+         "netsh int ipv4 show excludedportrange protocol=udp"
+         % (TEST_PORT, ", ".join(FALLBACK_PORTS), why))
+    sys.exit(2)
 
 
 def build_iap_tool():
@@ -184,8 +214,8 @@ def stop_stand_in(proc, handles, log=None):
 
     1. Listening sockets stay bound until the process dies, and SO_REUSEADDR
        lets the next case bind the same port while they do -- which of the two
-       accepts is then undefined. wait() closes that window; the supervisor's
-       job object takes the running half down with it.
+       accepts is then undefined. wait() closes that window; the running half
+       goes with the supervisor's job object.
     2. IAPTool exits as soon as it has sent the last byte, while the board is
        still printing what it did with it. settle_log waits for the log first.
     """
@@ -195,6 +225,7 @@ def stop_stand_in(proc, handles, log=None):
     proc.wait()
     for fh in handles:
         fh.close()
+
 
 
 def settle_log(log, quiet=0.25, timeout=3.0):

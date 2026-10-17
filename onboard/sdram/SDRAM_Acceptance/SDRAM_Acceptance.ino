@@ -19,24 +19,24 @@ OPENPLC_APP_VERSION(1, 0, 0);
 
 static void result(const char *name, bool ok, const char *detail = nullptr)
 {
-  Serial_Test.print("RESULT ");
-  Serial_Test.print(name);
-  Serial_Test.print(ok ? " PASS" : " FAIL");
+  RS232.print("RESULT ");
+  RS232.print(name);
+  RS232.print(ok ? " PASS" : " FAIL");
   if (detail) {
-    Serial_Test.print(" ");
-    Serial_Test.print(detail);
+    RS232.print(" ");
+    RS232.print(detail);
   }
-  Serial_Test.println();
+  RS232.println();
 }
 
 void setup()
 {
-  pinMode(RS232_EN_Pin, OUTPUT);
-  digitalWrite(RS232_EN_Pin, HIGH);
-  Serial_Test.begin(115200);
+  pinMode(RS232_EN, OUTPUT);
+  digitalWrite(RS232_EN, HIGH);
+  RS232.begin(115200);
   delay(200);
-  Serial_Test.println();
-  Serial_Test.println("=== SDRAM acceptance ===");
+  RS232.println();
+  RS232.println("=== SDRAM acceptance ===");
 
   /* --- before begin(): the API must refuse, not hand out addresses ------- */
   result("alloc_before_begin_returns_null", SDRAM.alloc(1024) == nullptr);
@@ -48,7 +48,7 @@ void setup()
   uint32_t beginUs = micros() - t0;
   result("begin", ok);
   if (!ok) {
-    Serial_Test.println("DONE");
+    RS232.println("DONE");
     return;
   }
   result("ready_after_begin", SDRAM.ready());
@@ -59,7 +59,7 @@ void setup()
   uint8_t *a = (uint8_t *)SDRAM.alloc(ONE_MB);
   result("alloc_1MB", a != nullptr);
   if (a == nullptr) {
-    Serial_Test.println("DONE");
+    RS232.println("DONE");
     return;
   }
 
@@ -106,8 +106,8 @@ void setup()
   result("zero_size_alloc_returns_null", SDRAM.alloc(0) == nullptr);
 
   /* --- measurements (not pass/fail) -------------------------------------- */
-  Serial_Test.print("MEASURE begin_us ");
-  Serial_Test.println(beginUs);
+  RS232.print("MEASURE begin_us ");
+  RS232.println(beginUs);
 
   size_t left = SDRAM.available();
   size_t chunk = 16UL * ONE_MB;
@@ -115,20 +115,20 @@ void setup()
   t0 = micros();
   void *big = SDRAM.alloc(chunk);
   uint32_t zeroUs = micros() - t0;
-  Serial_Test.print("MEASURE zero_bytes ");
-  Serial_Test.println((uint32_t)chunk);
-  Serial_Test.print("MEASURE zero_us ");
-  Serial_Test.println(zeroUs);
+  RS232.print("MEASURE zero_bytes ");
+  RS232.println((uint32_t)chunk);
+  RS232.print("MEASURE zero_us ");
+  RS232.println(zeroUs);
   result("large_alloc", big != nullptr);
 
   t0 = micros();
   void *raw = SDRAM.allocUninitialized(chunk / 2);
   uint32_t rawUs = micros() - t0;
-  Serial_Test.print("MEASURE uninit_us ");
-  Serial_Test.println(rawUs);
+  RS232.print("MEASURE uninit_us ");
+  RS232.println(rawUs);
   result("alloc_uninitialized", raw != nullptr);
 
-  Serial_Test.println("DONE");
+  RS232.println("DONE");
 }
 
 void loop() {}

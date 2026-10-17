@@ -21,15 +21,16 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, Section, Ok, Warn, Fail, get_go_bin,  # noqa: E402
+from common import (board_ip, cfg, Section, Ok, Warn, Fail, get_go_bin,  # noqa: E402
                     get_iap_tool, get_programmer_cli, get_scratch_dir,
-                    get_scratch_file, open_log_ports, read_log_ports,
-                    decode_serial, run_capture)
+                    get_scratch_file, open_board_log, open_rs232_ports,
+                    read_log_ports, decode_serial, run_capture)
 
-FQBN = ("OpenPLC_Alpha:stm32:OPEN-PLC:pnum=PLC_H743,usb=CDCgen,xusb=FS,"
-        "upload_method=cdcMethod,knxrole=dual_device")
+FQBN = ("OpenPLC_Alpha:stm32:OPEN-PLC:pnum=PLC_H743,usb=CDCgen,"
+        "upload_method=cdcMethod")
 
-ACCEPTED = "Checksum and signature OK"
+# The bootloader's line, on USB port 1 once the new app runs; the sketch prints on RS232.
+ACCEPTED = "[sys][BL] Checksum and signature OK"
 MIB = 1024.0 * 1024.0
 
 
@@ -70,10 +71,11 @@ def build(sketch):
 
 
 def flash_and_collect(bin_path, ip, port, collect_seconds):
-    """Upload over ethernet, holding the log port open across the whole flash.
+    """Upload over ethernet, holding the RS232 port and USB port 1 open across
+    the whole flash.
 
     IAPTool exits before the board has finished writing, and the sketch's output
-    starts right after the board reboots itself -- so the port must already be
+    starts right after the board reboots itself -- so the ports must already be
     open when IAPTool returns.
     """
     Section("flashing")
@@ -81,7 +83,8 @@ def flash_and_collect(bin_path, ip, port, collect_seconds):
     if not iap.exists():
         iap = get_iap_tool()
 
-    open_ports = open_log_ports([port])
+    open_ports = open_rs232_ports([port])
+    open_ports.update(open_board_log(sys_only=True))
     log = ""
     with open(get_scratch_file("sdram_flash.out"), "w") as so, \
             open(get_scratch_file("sdram_flash.err"), "w") as se:
@@ -110,7 +113,7 @@ def flash_and_collect(bin_path, ip, port, collect_seconds):
 
 def collect_only(port, collect_seconds):
     Section("collecting (reset to restart the sketch)")
-    open_ports = open_log_ports([port])
+    open_ports = open_rs232_ports([port])
     run_capture([get_programmer_cli(), "-c", "port=SWD", "mode=UR", "-rst"])
     return "\n".join(read_log_ports(open_ports, collect_seconds).values())
 
@@ -164,8 +167,7 @@ def main():
     ap.add_argument("--collect-seconds", type=int, default=25)
     args = ap.parse_args()
 
-    ip = args.ip or getattr(cfg, "BOARD_IP", "")
-    port = args.port or (cfg.LOG_PORTS[0] if cfg.LOG_PORTS else "")
+    port = args.port or getattr(cfg, "RS232_PORT", "")
 
     sketch = Path(cfg.TEST_REPO) / "onboard" / "sdram" / "SDRAM_Acceptance"
     if not sketch.exists():
@@ -175,8 +177,9 @@ def main():
     if args.skip_flash:
         serial = collect_only(port, args.collect_seconds)
     else:
+        ip = args.ip or board_ip()
         if not ip:
-            Fail("need --ip (or set BOARD_IP in config/machine.py)")
+            Fail("need --ip (or BOARD_UID in config/machine.py)")
             return 2
         bin_path = build(sketch)
         if bin_path is None:

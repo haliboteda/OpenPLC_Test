@@ -5,8 +5,10 @@
     python behaviour.py --boot BIN       use this bootloader image instead of building one
 
 Builds the current $BOOT source once, compiles each example with the USB menu
-set to "CDC (no generic 'Serial')" so Serial lands on UART4, lays out flash as
-T3-05 does, gives the example its inputs in Renode and judges its outputs.
+set to "CDC (no generic 'Serial')" so Serial, where the examples print, lands on
+UART4 (Serial4, the variant's SERIAL_UART_INSTANCE); RS232 is USART3. Lays out
+flash as T3-05 does, gives the example its inputs in Renode and judges its
+outputs; the bootloader's lines come from the SRAM4 boot log.
 Criteria, what differs from the real board and what this cannot see:
 $PROD/docs/modules/M3-app-runtime.md, T3-11 and footnote 6.
 
@@ -31,7 +33,8 @@ sys.path.insert(0, str(HERE.parent.parent / "tools"))
 
 from build_image import build_copy  # noqa: E402
 from common import EXE, Fail, Ok, Section, cfg, get_iap_tool, get_scratch_dir, read_text, run_capture  # noqa: E402
-from run import FQBN, PLATFORM, RENODE_TIMEOUT, flash_banks, symbols  # noqa: E402
+from run import (FQBN, PLATFORM, RENODE_TIMEOUT, boot_log_commands, boot_log_text,  # noqa: E402
+                 flash_banks, symbols)
 import netpeer  # noqa: E402
 import ymodem  # noqa: E402
 
@@ -175,6 +178,7 @@ def header(w, ex):
         "uart4 CreateFileBackend @%s/uart4.txt true" % p,
         "usart2 CreateFileBackend @%s/usart2.txt true" % p,
     ]
+    lines.append("usart3 CreateFileBackend @%s/usart3.txt true" % p)
     if ex.real_time:
         # About as fast as the wall clock, so a peer on the host keeps pace
         # ($PROD/maps/sim-coverage/SIM-03-findings.md).
@@ -184,7 +188,7 @@ def header(w, ex):
 
 def run_renode(w, ex, sym):
     p = w.path.as_posix()
-    lines = header(w, ex) + ex.script(w, sym) + ['echo "END"', "q"]
+    lines = header(w, ex) + ex.script(w, sym) + boot_log_commands() + ['echo "END"', "q"]
     (w.path / "run.resc").write_text("\n".join(lines) + "\n")
     peers = ex.peers(w)
     for start, _ in peers:
@@ -288,6 +292,32 @@ class Sequence(Example):
                 ("prints '%s'" % self.last, self.last in u)]
 
 
+class Relays(Sequence):
+    """One round, then stops; r / i over the limit warn, a line during a run stops it."""
+
+    def __init__(self):
+        Sequence.__init__(self, "Relays", "REL", 6, "RY", "done, all relays open")
+
+    def script(self, w, sym):
+        # The only round runs at start-up, so sampling starts before the app does.
+        lines = [run_for(1)]
+        addrs = [GPIO_BASE[p] + ODR for p in self.ports()]
+        for i in range(int((BOOT_S + self.count * 1.2 + 2) / 0.25)):
+            lines += [run_for(0.25)] + sample("t%03d" % i, addrs)
+        return (lines
+                + uart_write("uart4", b"r 101\ni 500\ng\n") + [run_for(0.3)]
+                + uart_write("uart4", b"s\n") + [run_for(0.5)])
+
+    def judge(self, w):
+        u = w.text("uart4.txt")
+        return Sequence.judge(self, w) + [
+            ("nothing closes after 'done' until g", ordered(u, [r"RY6 closed", r"done, all relays open\r?\nrounds = 101"])),
+            ("r 101 warns", ordered(u, [r"rounds = 101", r"warning: over 100 rounds"])),
+            ("i 500 warns", ordered(u, [r"interval = 500 ms", r"warning: under 1000 ms"])),
+            ("g runs with the new settings, a typed line stops it",
+             ordered(u, [r"run: 101 round\(s\), 500 ms per relay", r"RY1 closed", r"stopped, all relays open"]))]
+
+
 class SystemLED(Example):
     def script(self, w, sym):
         lines = [run_for(BOOT_S)]
@@ -324,6 +354,31 @@ class AOOutputs(Example):
         return checks
 
 
+class DOPWM(Example):
+    # DO3 = PH15 = TIM8_CH3N. PSC, ARR, CCR3 of TIM8 (0x40010400).
+    TIM8 = [0x40010428, 0x4001042C, 0x4001043C]
+
+    def script(self, w, sym):
+        return ([run_for(BOOT_S)] + uart_write("uart4", b"3 50\n") + [run_for(0.5)] + sample("a", self.TIM8)
+                + uart_write("uart4", b"f 2000\n3 25\n") + [run_for(0.5)] + sample("b", self.TIM8)
+                + uart_write("uart4", b"r 12\n3 50\n") + [run_for(0.5)] + sample("c", self.TIM8))
+
+    def judge(self, w):
+        got = samples(w.console, 3)
+        u = w.text("uart4.txt")
+        a, b, c = got.get("a"), got.get("b"), got.get("c")
+        duty = lambda r: r[2] / (r[1] + 1.0)
+        period = lambda r: (r[0] + 1) * (r[1] + 1)
+        return [("prints the 50 % line", "DO3 = 50 % at 1000 Hz; DO7 off" in u),
+                ("TIM8 CCR3 / ARR is 50 %% (got %s)" % (a and "%.3f" % duty(a)), a is not None and abs(duty(a) - 0.5) < 0.02),
+                ("TIM8 CCR3 / ARR is 25 %% after f 2000 (got %s)" % (b and "%.3f" % duty(b)), b is not None and abs(duty(b) - 0.25) < 0.02),
+                ("f 2000 halves the period (got %s)" % (a and b and "%.3f" % (period(b) / float(period(a)))),
+                 a is not None and b is not None and abs(period(b) / float(period(a)) - 0.5) < 0.02),
+                # 2047 read as 8-bit would be always on, so 50 % here means the resolution took effect.
+                ("prints the 12-bit line", "resolution 12 bits, full scale 4095" in u),
+                ("TIM8 CCR3 / ARR is 50 %% after r 12 (got %s)" % (c and "%.3f" % duty(c)), c is not None and abs(duty(c) - 0.5) < 0.02)]
+
+
 class BoardTemperature(Example):
     # LM50: 500 mV at 0 C, 10 mV per degree. ADC1 INP16 = protection, INP15 = output switches.
     VOLTS = {16: 0.750, 15: 0.800}
@@ -340,16 +395,32 @@ class BoardTemperature(Example):
                 ("output switches read 30 C +-1 (got %s)" % sw, sw is not None and abs(sw - 30) <= 1)]
 
 
+class AIInputs(Example):
+    # AI1 = ADC3 INP1 behind 90.6k / 22.6k, AI2 = ADC1 INP3 across 124 R. No
+    # calibration in the simulated flash, so the nominal conversion applies.
+    AI1_PIN_V, AI2_PIN_V = 1.000, 1.240
+
+    def script(self, w, sym):
+        return ["sysbus.adc3 SetVoltage %d 1" % int(self.AI1_PIN_V * 1e6),
+                "sysbus.adcM1S2 SetVoltage %d 3" % int(self.AI2_PIN_V * 1e6),
+                run_for(BOOT_S + 3)]
+
+    def judge(self, w):
+        u = w.text("uart4.txt")
+        m = re.findall(r"AI1 = (-?[\d.]+) mV   AI2 = (-?[\d.]+) mA", u)
+        ai1, ai2 = (float(m[-1][0]), float(m[-1][1])) if m else (None, None)
+        want1, want2 = self.AI1_PIN_V * 1000 * 90.6 / 22.6, self.AI2_PIN_V * 1000 / 124
+        return [("AI1 reads %.0f mV +-1%% (got %s)" % (want1, ai1), ai1 is not None and abs(ai1 - want1) <= want1 / 100),
+                ("AI2 reads %.3f mA +-1%% (got %s)" % (want2, ai2), ai2 is not None and abs(ai2 - want2) <= want2 / 100)]
+
+
 class Echo(Example):
     def __init__(self, name, uart, send, expect):
         Example.__init__(self, name)
         self.uart, self.send, self.expect = uart, send, expect
 
     def script(self, w, sym):
-        lines = [run_for(BOOT_S)]
-        if self.uart == "usart3":
-            lines.insert(0, "usart3 CreateFileBackend @%s/usart3.txt true" % w.path.as_posix())
-        return lines + uart_write(self.uart, self.send) + [run_for(1)]
+        return [run_for(BOOT_S)] + uart_write(self.uart, self.send) + [run_for(1)]
 
     def judge(self, w):
         return [("%s shows /%s/" % (f, rx), re.search(rx, w.text(f)) is not None) for f, rx in self.expect]
@@ -455,11 +526,11 @@ class SDFileReceive(Example):
     def script(self, w, sym):
         img = w.path / "sd.img"
         mkfs_fat32(img, SD_IMAGE_SIZE)
-        w.ports["rs232"] = free_port()
-        port, pin = "E", 6   # SDMMC_CD_Pin, low = card in
+        w.ports["usb"] = free_port()
+        port, pin = "E", 6   # SDMMC_CD, low = card in
         return ["machine SdCardFromFile @%s sysbus.sdmmc 0x%X true" % (img.as_posix(), SD_IMAGE_SIZE),
-                'emulation CreateServerSocketTerminal %d "rs232" false' % w.ports["rs232"],
-                "connector Connect sysbus.usart3 rs232",
+                'emulation CreateServerSocketTerminal %d "usb" false' % w.ports["usb"],
+                "connector Connect sysbus.uart4 usb",
                 run_for(BOOT_S + 50)] + gpio_set(port, pin, True) + [run_for(2)] + gpio_set(port, pin, False) + [
                 run_for(2)]
 
@@ -469,7 +540,7 @@ class SDFileReceive(Example):
         def send():
             for _ in range(600):
                 try:
-                    sp = ThrottledSocket(w.ports["rs232"])
+                    sp = ThrottledSocket(w.ports["usb"])
                     break
                 except OSError:
                     time.sleep(0.1)
@@ -497,22 +568,24 @@ class SDRAM(Example):
         self.steps, self.expect = steps, expect
 
     def script(self, w, sym):
-        return ["usart3 CreateFileBackend @%s/usart3.txt true" % w.path.as_posix()] + self.steps
+        return self.steps
 
     def judge(self, w):
-        t = w.text("usart3.txt")
-        return [("RS232 shows /%s/" % rx, re.search(rx, t) is not None) for rx in self.expect]
+        t = w.text("uart4.txt")
+        return [("Serial shows /%s/" % rx, re.search(rx, t) is not None) for rx in self.expect]
 
 
 EXAMPLES = [
     DIInputs("DI_Inputs"),
     Sequence("DO_Outputs", "DOUT", 8, "DO", "DO8 on"),
-    Sequence("Relays", "REL", 6, "RY", "RY6 closed"),
+    Relays(),
     SystemLED("SystemLED"),
     AOOutputs("AO_Outputs"),
+    DOPWM("DO_PWM"),
     BoardTemperature("BoardTemperature"),
+    AIInputs("AI_Inputs"),
     Echo("RS232_Echo", "usart3", b"EXB-PING-3\n",
-         [("usart3.txt", r"EXB-PING-3\n"), ("uart4.txt", r"RS232 got 0x45")]),
+         [("usart3.txt", r"EXB-PING-3\n"), ("uart4.txt", r"RS232_Echo: got 11 bytes")]),
     Echo("RS485_Echo", "usart2", b"EXB-PING-1\n",
          [("usart2.txt", r"EXB-PING-1\n"), ("uart4.txt", r"RS485 echoed: EXB-PING-1")]),
     Echo("USB_Serial", "uart4", b"EXB-PING-2\n", [("uart4.txt", r"1: EXB-PING-2")]),
@@ -522,7 +595,7 @@ EXAMPLES = [
     SDFileReceive(),
     SDRAM("SDRAM_Basic", [run_for(BOOT_S + 3)],
           [r"SDRAM ready, \d+ MB free", r"wrote and verified \d+ words, mismatches: 0\r?\n"]),
-    SDRAM("SDRAM_DataLogger", [run_for(BOOT_S + 3)] + uart_write("usart3", b"d") + [run_for(3)],
+    SDRAM("SDRAM_DataLogger", [run_for(BOOT_S + 3)] + uart_write("uart4", b"d") + [run_for(3)],
           [r"=== SDRAM data logger ===", r"press 'd' for a dump", r"samples held: \d+"]),
 ]
 
@@ -576,7 +649,8 @@ def main():
             continue
         flash_banks(boot_bin, build / (ex.name + ".ino.bin"), get_iap_tool(), w.path)
         run_renode(w, ex, symbols(nm[-1], build / (ex.name + ".ino.elf")))
-        checks = [("bootloader jumped into the app", "APP Mod" in w.text("uart4.txt"))] + ex.judge(w)
+        checks = [("bootloader jumped into the app",
+                   "[sys][BL] ** APP Mod" in boot_log_text(w.console))] + ex.judge(w)
         for name, ok in checks:
             (Ok if ok else Fail)("  %s %s" % ("ok  " if ok else "FAIL", name))
         if all(ok for _, ok in checks):

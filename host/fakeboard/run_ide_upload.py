@@ -14,6 +14,9 @@ no options. Three cases:
              -> the board ignores the reboot request, arduino-cli fails with
                 "did not accept the reboot request"
 
+Without --verbose the claimed case must print at most QUIET_MAX_LINES lines:
+IAPTool logs only the key lines unless the IDE passes -v (decision 124).
+
 Success is judged from the board's side too: it must have accepted the reboot
 and received the whole image.
 
@@ -32,7 +35,6 @@ Exit 0 = all three behaved, 1 = at least one did not, 2 = prerequisites missing.
 
 import argparse
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -44,12 +46,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _common import (DISCOVERY_PORT, Fail, Ok, Section, build_stand_in,  # noqa: E402
-                     cfg, nonblank_lines, read_text, resolve_port, start_stand_in,
-                     stop_stand_in, wait_for_serving)
+                     cfg, isolated_env, nonblank_lines, read_text, resolve_port,
+                     start_stand_in, stop_stand_in, user_key_path, wait_for_serving)
 from common import EXE, get_iap_tool  # noqa: E402
 
-FQBN = ("OpenPLC_Alpha:stm32:OPEN-PLC:pnum=PLC_H743,usb=CDCgen,xusb=FS,"
-        "upload_method=ethMethod,knxrole=dual_device")
+FQBN = ("OpenPLC_Alpha:stm32:OPEN-PLC:pnum=PLC_H743,usb=CDCgen,"
+        "upload_method=ethMethod")
 EXAMPLE = "DO_Outputs"
 # Not a real STM32 UID: IAPTool matches boards by UID, so a real board on the
 # LAN can never be mistaken for this one.
@@ -60,6 +62,8 @@ BOARD_APP_VERSION = "0.0.1"
 # discovery takes ~1.3 s to start on Windows; arduino-cli's default wait is 1 s.
 DISCOVERY_TIMEOUT = "10s"
 LOCK_NAME = "openplc-iap-upload.lock"
+# The whole upload log of an ordinary upload with verbose output off (decision 124).
+QUIET_MAX_LINES = 10
 
 
 def cli_argv(*args):
@@ -161,11 +165,11 @@ def main():
     started = time.time()
     scratch = Path(tempfile.mkdtemp(prefix="ide-upload-"))
     print("scratch: %s" % scratch)
-    appdata, tmp = scratch / "appdata", scratch / "tmp"
-    user_keys = appdata / "openplc" / "keys"
-    for d in (user_keys, tmp, scratch / "build", scratch / "keys"):
+    env = isolated_env(scratch)
+    tmp = Path(env["TMPDIR"])
+    user_keys = user_key_path(env).parent
+    for d in (user_keys, scratch / "build", scratch / "keys"):
         d.mkdir(parents=True)
-    env = dict(os.environ, APPDATA=str(appdata), TEMP=str(tmp), TMP=str(tmp))
 
     try:
         return run_cases(scratch, env, user_keys, tmp, started)
@@ -210,16 +214,17 @@ def run_cases(scratch, env, user_keys, tmp, started):
         return 2
 
     # id, key the board trusts ("none" = factory board in its bootloader),
-    # user key to place (or None), expect success, line
+    # user key to place (or None), expect success, line, most output lines
     cases = [
-        ("unclaimed", "none", None, True, "Claimed."),
-        ("claimed", owner_pub, owner_pem, True, "The board reset and is answering again"),
-        ("wrong-key", owner_pub, other_pem, False, "did not accept the reboot request"),
+        ("unclaimed", "none", None, True, "Claimed.", None),
+        ("claimed", owner_pub, owner_pem, True, "The board reset and is answering again",
+         QUIET_MAX_LINES),
+        ("wrong-key", owner_pub, other_pem, False, "did not accept the reboot request", None),
     ]
 
     failed = 0
     ip = None
-    for cid, trusted, user_key, expect_ok, line in cases:
+    for cid, trusted, user_key, expect_ok, line, max_lines in cases:
         factory = trusted == "none"
         Section("%s  -- expecting: %s" % (cid, line))
         user_dest = user_keys / "fw_signing_key.pem"
@@ -271,6 +276,8 @@ def run_cases(scratch, env, user_keys, tmp, started):
         problems = []
         if line.lower() not in out.lower():
             problems.append("expected line not in arduino-cli output")
+        if max_lines is not None and len(nonblank_lines(out)) > max_lines:
+            problems.append("%d output lines, more than %d" % (len(nonblank_lines(out)), max_lines))
         if expect_ok:
             if rc != 0:
                 problems.append("arduino-cli exited %d" % rc)

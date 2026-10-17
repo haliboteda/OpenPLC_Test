@@ -24,7 +24,7 @@ sys.path.insert(0, str(HERE.parent.parent / "tools"))
 
 from build_image import build_copy  # noqa: E402
 from common import EXE, Fail, Ok, Section, cfg, get_iap_tool, get_scratch_dir, read_text, run_capture  # noqa: E402
-from run import FQBN, PLATFORM, flash_banks, symbols  # noqa: E402
+from run import FQBN, PLATFORM, boot_log_commands, boot_log_text, flash_banks, symbols  # noqa: E402
 
 APP_EXAMPLE = "SystemLED"
 GPIO_BASE = {"A": 0x58020000, "B": 0x58020400, "C": 0x58020800, "D": 0x58020C00, "E": 0x58021000,
@@ -64,7 +64,6 @@ def run_renode(work, boot_sym, app_sym, ports, bor_level):
         "sysbus LoadBinary @%s/bank1.bin 0x08000000" % w,
         "sysbus LoadBinary @%s/bank2.bin 0x08100000" % w,
         "cpu VectorTableOffset 0x08000000",
-        "uart4 CreateFileBackend @%s/uart4.txt true" % w,
     ]
     if bor_level is not None:
         # The option-byte programming sequence ST-Link uses: unlock, stage, start.
@@ -82,7 +81,7 @@ def run_renode(work, boot_sym, app_sym, ports, bor_level):
         lines.append('cpu AddHook 0x%08X "%s; self.RemoveHooksAt(0x%08X)"' % (addr, sample_hook(tag, ports), addr))
     lines += ['emulation RunFor "00:00:%02d"' % RUN_SECONDS, 'echo "SAMPLE app-running"']
     lines += ["sysbus ReadDoubleWord 0x%08X" % (GPIO_BASE[p] + off) for p in ports for off in (MODER, OTYPER, ODR)]
-    lines += ['echo "SAMPLES DONE"', "q"]
+    lines += ['echo "SAMPLES DONE"'] + boot_log_commands() + ["q"]
     (work / "run.resc").write_text("\n".join(lines) + "\n")
     # stdin stays open until Renode quits (see run.py). --console opens no port.
     p = subprocess.Popen([cfg.RENODE, "--disable-gui", "--console", "-e", "include @%s/run.resc" % w],
@@ -96,8 +95,9 @@ def run_renode(work, boot_sym, app_sym, ports, bor_level):
     timer.cancel()
     out = re.sub(r"\x1b\[[0-9;]*m", "", out)
     (work / "console.txt").write_text(out, encoding="utf-8")
-    uart4 = (work / "uart4.txt").read_text(errors="replace") if (work / "uart4.txt").exists() else ""
-    return out, uart4, [tag for tag, _ in points] + ["app-running"]
+    log = boot_log_text(out)
+    (work / "bootlog.txt").write_text(log, encoding="utf-8")
+    return out, log, [tag for tag, _ in points] + ["app-running"]
 
 
 def samples(out, ports):
@@ -113,9 +113,10 @@ def samples(out, ports):
     return {tag: {p: tuple(v[3 * i:3 * i + 3]) for i, p in enumerate(ports)} for tag, v in found.items()}
 
 
-def judge(out, uart4, tags, pins, ports, bor_level):
+def judge(out, log, tags, pins, ports, bor_level):
+    """log: the SRAM4 boot log; every bootloader line starts with [sys][BL]."""
     got = samples(out, ports)
-    checks = [("bootloader jumped into the app", "APP Mod" in uart4)]
+    checks = [("bootloader jumped into the app", "[sys][BL] ** APP Mod" in log)]
     for tag in tags:
         if tag not in got:
             checks.append(("%s: sampled" % tag, False))
@@ -133,9 +134,9 @@ def judge(out, uart4, tags, pins, ports, bor_level):
     want = 0 if bor_level is None else bor_level
     checks.append(("OPTSR_CUR reads BOR_LEV %d (got %s)" % (want, level), level == want))
     if want == 3:
-        checks.append(("no BOR warning on UART4", BOR_WARNING not in uart4))
+        checks.append(("no BOR warning in the boot log", BOR_WARNING not in log))
     else:
-        checks.append(("BOR warning on UART4 names level %d" % want, "%s %d " % (BOR_WARNING, want) in uart4))
+        checks.append(("BOR warning in the boot log names level %d" % want, "%s %d " % (BOR_WARNING, want) in log))
     return checks
 
 
@@ -189,8 +190,8 @@ def main():
         work = root / ("bor-%s" % ("reset" if bor_level is None else bor_level))
         work.mkdir()
         flash_banks(boot_bin, app_bin, get_iap_tool(), work)
-        out, uart4, tags = run_renode(work, boot_sym, app_sym, ports, bor_level)
-        for name, ok in judge(out, uart4, tags, pins, ports, bor_level):
+        out, log, tags = run_renode(work, boot_sym, app_sym, ports, bor_level)
+        for name, ok in judge(out, log, tags, pins, ports, bor_level):
             (Ok if ok else Fail)("  %s %s" % ("ok  " if ok else "FAIL", name))
             failed |= not ok
 

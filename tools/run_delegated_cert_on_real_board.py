@@ -1,7 +1,7 @@
 """T2-11 -- a REAL board accepts a delegated certificate and runs the firmware it names.
 
     python tools/run_delegated_cert_on_real_board.py
-    python tools/run_delegated_cert_on_real_board.py --bin ../Output/iap_probe_app.bin
+    python tools/run_delegated_cert_on_real_board.py --bin Output/probe-images/iap_probe_v1.bin
     python tools/run_delegated_cert_on_real_board.py --ip 192.168.0.3
 
 Requirement R2-03: the board has understood certificate chains since version one.
@@ -37,23 +37,26 @@ import argparse
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from common import (Fail, Ok, Section, Warn, assert_target_reachable,  # noqa: E402
-                    cfg, get_iap_tool, get_output_dir, get_programmer_cli, get_scratch_dir,
-                    open_log_ports, read_log_ports)
+from common import (board_ip, Fail, Ok, Section, Warn, assert_target_reachable,  # noqa: E402
+                    boot_log_next, get_iap_tool, get_output_dir, get_programmer_cli,
+                    get_scratch_dir, read_boot_log_swd)
 
-APP_STARTED = "** APP Mod"
+# Bootloader lines, read from the SRAM4 buffer over SWD: during the commit the
+# board is in the bootloader, which has no USB port 1.
+APP_STARTED = "[sys][BL] ** APP Mod"
 APP_REJECTED = "App signature invalid or absent"
 # Printed on every boot whatever happens next, so its absence means the capture
 # failed rather than the board having stayed quiet.
-CAPTURE_PROOF = "Bootloader state:"
-# The board's own commit sequence, printed after IAPTool has stopped sending.
-COMMIT_VERIFY = "Transfer complete, verifying"
-COMMIT_ERASE = "Erasing application region"
+CAPTURE_PROOF = "[sys][BL] Bootloader state:"
+# The board's own commit sequence, logged after IAPTool has stopped sending.
+COMMIT_VERIFY = "[sys][BL] Transfer complete, verifying"
+COMMIT_ERASE = "[sys][BL] Erasing application region"
 COMMIT_WAIT_S = 10
 
 
@@ -88,27 +91,33 @@ def key_public_hex(tool, key_path):
     return m.group(1).lower() if m else None
 
 
-def boot_once(cli, ports, seconds):
-    open_ports = open_log_ports(ports)
+def boot_log_since(cli, mark):
+    return "\n".join(t for _, t in read_boot_log_swd(cli, since=mark) or [])
+
+
+def boot_once(cli, seconds):
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
     subprocess.run([str(cli), "-c", "port=SWD", "mode=UR", "-rst"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return "\n".join(read_log_ports(open_ports, seconds).values())
+    time.sleep(seconds)
+    return boot_log_since(cli, mark)
 
 
 def main():
     ap = argparse.ArgumentParser(add_help=True)
-    ap.add_argument("--ip", default=cfg.BOARD_IP)
+    ap.add_argument("--ip", default="", help="default: found by BOARD_UID")
     ap.add_argument("--bin", default=None, help="application image to upload")
     ap.add_argument("--root-key", default=None,
                     help="private half of the root the board trusts")
     ap.add_argument("--seconds", type=int, default=12)
-    ap.add_argument("--ports", nargs="*", default=None)
     args = ap.parse_args()
 
-    ports = args.ports if args.ports else cfg.LOG_PORTS
+    args.ip = args.ip or board_ip()
+    if not args.ip:
+        return 2
     tool = get_iap_tool()
     cli = get_programmer_cli()
-    app = Path(args.bin) if args.bin else get_output_dir() / "iap_probe_app.bin"
+    app = Path(args.bin) if args.bin else get_output_dir() / "probe-images" / "iap_probe_v2.bin"
     if not args.root_key:
         Fail("pass --root-key: the private half of the root this board trusts "
              "(the key that claimed it)")
@@ -177,9 +186,9 @@ def main():
     # verify, erase and write its metadata after that, and a hard reset landing
     # in that window interrupts the commit -- the board then comes up with
     # "metadata absent" and the case looks like a signature failure when nothing
-    # was wrong with the signature. So the serial port is opened BEFORE the
-    # upload and the board's own commit lines are what we wait for.
-    open_ports = open_log_ports(ports)
+    # was wrong with the signature. So the board's own commit lines are what we
+    # wait for, counted from before the upload.
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
     up, rc = run([tool, "ether", str(app), args.ip,
                   "--key=%s" % leaf, "--cert=%s" % cert_file])
     for line in up.splitlines():
@@ -187,8 +196,11 @@ def main():
             print("    %s" % line)
     if rc != 0:
         Fail("  IAPTool exited %d" % rc)
-    commit = read_log_ports(open_ports, COMMIT_WAIT_S)
-    commit_text = "\n".join(commit.values())
+    deadline = time.monotonic() + COMMIT_WAIT_S
+    commit_text = boot_log_since(cli, mark)
+    while COMMIT_ERASE not in commit_text and time.monotonic() < deadline:
+        time.sleep(2)
+        commit_text = boot_log_since(cli, mark)
     if commit_text:
         print(commit_text)
 
@@ -199,7 +211,7 @@ def main():
     uploaded = rc == 0 and verified and erased
 
     Section("Reset and see what runs")
-    log = boot_once(cli, ports, args.seconds)
+    log = boot_once(cli, args.seconds)
     if log:
         print(log)
 

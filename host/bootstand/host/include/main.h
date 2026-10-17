@@ -17,7 +17,6 @@
 typedef enum { HAL_OK = 0, HAL_ERROR = 1, HAL_BUSY = 2, HAL_TIMEOUT = 3 } HAL_StatusTypeDef;
 
 typedef struct { int dummy; } CRC_HandleTypeDef;
-typedef struct { int dummy; } UART_HandleTypeDef;
 typedef struct { int dummy; } GPIO_TypeDef;
 typedef struct { int dummy; } RNG_HandleTypeDef;
 typedef struct { int dummy; } RTC_HandleTypeDef;
@@ -33,7 +32,6 @@ void HAL_NVIC_SystemReset(void);
 uint32_t HAL_CRC_Calculate(CRC_HandleTypeDef *h, uint32_t *buf, uint32_t len);
 int HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin);
 void HAL_MPU_Disable(void);
-HAL_StatusTypeDef HAL_UART_DeInit(UART_HandleTypeDef *h);
 HAL_StatusTypeDef HAL_RCC_DeInit(void);
 HAL_StatusTypeDef HAL_DeInit(void);
 uint32_t HAL_GetUIDw0(void);
@@ -80,15 +78,19 @@ void SCB_EnableICache(void);
 void SCB_CleanDCache_by_Addr(uint32_t *addr, int32_t size);
 void SCB_InvalidateDCache_by_Addr(uint32_t *addr, int32_t size);
 void __disable_irq(void);
+uint32_t __get_PRIMASK(void);
+void __set_PRIMASK(uint32_t primask);
 #define __DSB() ((void)0)
 #define __ISB() ((void)0)
 #define __HAL_RCC_BKPRAM_CLK_ENABLE() ((void)0)
+#define __HAL_RCC_TIM6_CLK_DISABLE()   ((void)0)
+#define __HAL_RCC_SYSCFG_CLK_DISABLE() ((void)0)
 #define D3_BKPSRAM_BASE 0x38800000UL
 
 typedef struct { volatile uint32_t CTRL, LOAD, VAL; } SysTick_Type;
 typedef struct { volatile uint32_t ICER[8], ICPR[8]; } NVIC_Type;
 typedef struct { volatile uint32_t VTOR; } SCB_Type;
-typedef struct { volatile uint32_t RSR; } RCC_TypeDef;
+typedef struct { volatile uint32_t RSR, AHB4ENR; } RCC_TypeDef;
 extern SysTick_Type *SysTick;
 extern NVIC_Type *NVIC;
 extern SCB_Type *SCB;
@@ -106,6 +108,8 @@ extern RCC_TypeDef *RCC;
 extern CRC_HandleTypeDef hcrc;
 extern RNG_HandleTypeDef hrng;
 extern RTC_HandleTypeDef hrtc;
-extern UART_HandleTypeDef huart4;
+
+/* $BOOT/Core/Src/main.c; here in boot/boot_glue.c. */
+void boot_log_flush_stdout(void);
 
 #endif

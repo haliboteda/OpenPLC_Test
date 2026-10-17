@@ -29,14 +29,14 @@ OPENPLC_APP_VERSION(1, 0, 0);
 void setup()
 {
     // The UART reaches terminals C05/C06 through the on-board MAX3221 (U5),
-    // whose enable is gated by RS232_EN_Pin via MOSFET Q5. The Arduino core's
+    // whose enable is gated by RS232_EN via MOSFET Q5. The Arduino core's
     // main.cpp only does pinMode(PB_10, OUTPUT) and never writes a level, so
     // the pin sits at its reset value (low) and the transceiver stays off --
     // nothing reaches the terminals until this drives it high.
-    digitalWrite(RS232_EN_Pin, HIGH);
+    digitalWrite(RS232_EN, HIGH);
 
-    Serial_Test.begin(ECHO_BAUD);
-    Serial_Test.println("UART echo ready");
+    RS232.begin(ECHO_BAUD);
+    RS232.println("UART echo ready");
 
 #if defined(USBCON) && defined(USBD_USE_CDC)
     SerialUSB.begin(ECHO_BAUD);
@@ -46,9 +46,9 @@ void setup()
 
 void loop()
 {
-    while (Serial_Test.available()) {
-        Serial_Test.print("U:");
-        Serial_Test.write(Serial_Test.read());
+    while (RS232.available()) {
+        RS232.print("U:");
+        RS232.write(RS232.read());
     }
 
 #if defined(USBCON) && defined(USBD_USE_CDC)

@@ -32,9 +32,10 @@ add_compile_options(-Wall -O2 -g)
 
 set(HOST ${CMAKE_CURRENT_SOURCE_DIR}/host)
 set(HOST_SRC ${HOST}/hostmem.c ${HOST}/hostctl.c ${HOST}/lwip_bridge.c ${HOST}/hal_host.c)
-if(WIN32)
-  set(HOST_LIBS ws2_32 bcrypt)
+if(NOT WIN32)
+  message(FATAL_ERROR "The bootloader stand-in is Windows only (decision 143).")
 endif()
+set(HOST_LIBS ws2_32 bcrypt)
 if(MINGW)
   # No MinGW runtime DLL lookup at run time: the test scripts start these with
   # whatever PATH they have.
@@ -54,7 +55,7 @@ add_executable(bootstand_boot
   ${IAP}/IAP_server.c ${IAP}/tcp_server.c ${IAP}/udp_server.c
   ${IAP}/bootloader_state.c ${IAP}/bkp_stash.c ${IAP}/owner_slot.c
   ${IAP}/iap_auth.c ${IAP}/iap_cert.c ${IAP}/iap_keyderive.c ${IAP}/fw_verify.c
-  ${IAP}/sha256.c ${IAP}/net_rand.c ${IAP}/uecc/uECC.c ${IAP}/IAP_boot_handoff.c
+  ${IAP}/sha256.c ${IAP}/net_rand.c ${IAP}/uecc/uECC.c ${IAP}/IAP_boot_handoff.c ${IAP}/boot_log.c
   ${BOOT_ROOT}/Core/Src/usbd_cdc_flash.c)
 # Stubs first, so they shadow the HAL-backed headers in Core/Inc.
 target_include_directories(bootstand_boot PRIVATE
@@ -68,8 +69,8 @@ add_executable(bootstand_app
   ${HOST_SRC}
   app/main_app.c
   ${OIAP}/udp_server.c ${OIAP}/iap_auth.c ${OIAP}/iap_cert.c ${OIAP}/iap_keyderive.c
-  ${OIAP}/owner_root_ro.c ${OIAP}/fw_verify.c ${OIAP}/sha256.c ${OIAP}/uecc/uECC.c
-  ${CORE_ROOT}/cores/arduino/stm32/IAP_boot_handoff.c)
+  ${OIAP}/owner_root_ro.c ${OIAP}/fw_meta_ro.c ${OIAP}/fw_verify.c ${OIAP}/sha256.c ${OIAP}/uecc/uECC.c
+  ${CORE_ROOT}/cores/arduino/stm32/IAP_boot_handoff.c ${CORE_ROOT}/cores/arduino/stm32/boot_log.c)
 target_include_directories(bootstand_app PRIVATE
   ${HOST} ${HOST}/include app/stubs ${OIAP}
   ${CORE_ROOT}/libraries/OpenPLC_Net/src ${CORE_ROOT}/cores/arduino/stm32 ${CORE_ROOT}/cores/arduino)

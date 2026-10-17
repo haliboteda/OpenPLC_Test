@@ -33,7 +33,7 @@ OPENPLC_APP_VERSION(1, 0, 0);
 // The board takes its address by DHCP, so a changed MAC also changes the IP.
 // That is the point of R1-13: find the board by broadcast and UID, not by MAC.
 
-#include "OpenPLC_IAP_Autostart.h"   // udp receive counters, see loop()
+#include "openplc_net.h"   // udp receive counters, see loop()
 
 // Stamped into the boot banner so a script can tell two builds of this sketch
 // apart. The five images built before 2026-09-21 all printed byte-identical
@@ -57,8 +57,8 @@ void setup() {
   // printf() inside the IAP libraries is lost. Serial (USB CDC) is unaffected;
   // this is what makes the library's own diagnostics visible.
   // See $PROD/docs/hardware/HARDWARE-FACTS.md, "RS232".
-  pinMode(RS232_EN_Pin, OUTPUT);
-  digitalWrite(RS232_EN_Pin, HIGH);
+  pinMode(RS232_EN, OUTPUT);
+  digitalWrite(RS232_EN, HIGH);
 
   // newlib buffers stdout, so a printf() inside the IAP libraries sits in RAM
   // until the buffer fills -- the diagnostics never reach the line. Unbuffered
@@ -74,11 +74,11 @@ void loop() {
   Serial.println("IAP_PROBE_APP alive");
   // Also on RS232, so the library diagnostics and this heartbeat share one
   // channel -- Serial is USB CDC and never reaches the RS232 terminals.
-  // Both channels on purpose: Serial_Test is the RS232 console directly, and
+  // Both channels on purpose: RS232 is the RS232 console directly, and
   // printf is the path the IAP libraries use. They agreed 30 lines to 30 over
   // the same window on 2026-09-21, once DEBUG_UART was pinned to USART3/PC10 --
   // before that printf resolved to PH13, the expansion header, and was lost.
-  Serial_Test.println("IAP_PROBE_APP alive");
+  RS232.println("IAP_PROBE_APP alive");
   printf("IAP_PROBE_APP alive via printf\r\n");
 
   // UDP receive counters, straight from the IAP library (getters are already

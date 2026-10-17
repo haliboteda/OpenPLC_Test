@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, Section, Ok, Fail,  # noqa: E402
+from common import (board_ip, cfg, Section, Ok, Fail,  # noqa: E402
                     Warn, get_go_bin, get_output_dir, run_capture, tcp_command)
 
 
@@ -53,9 +53,9 @@ def main():
     ap.add_argument("--ports", nargs="*", default=None)
     args = ap.parse_args()
 
-    ip = args.ip or getattr(cfg, "BOARD_IP", "")
+    ip = args.ip or board_ip()
     if not ip:
-        Fail("need --ip (or set BOARD_IP in config/machine.py)")
+        Fail("need --ip (or BOARD_UID in config/machine.py)")
         return 2
 
     iap = get_go_bin("IAPTool")

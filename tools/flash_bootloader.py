@@ -27,8 +27,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from common import (Fail, Ok, Section, Warn, assert_target_reachable,  # noqa: E402
-                    cfg, get_cube_ide_exe, get_programmer_cli, open_log_ports,
-                    read_log_ports, read_text)
+                    boot_log_next, cfg, get_cube_ide_exe, get_programmer_cli,
+                    read_boot_log_swd, read_text)
 
 # Sector 0 holds only bootloader code (the root area is in sector 15). Read the
 # cap out of the linker script so the two cannot disagree.
@@ -112,14 +112,12 @@ def main():
     ap.add_argument("--skip-build", action="store_true")
     ap.add_argument("--reset-only", action="store_true")
     ap.add_argument("--seconds", type=int, default=12)
-    ap.add_argument("--ports", nargs="*", default=None)
     ap.add_argument("--elf", default="",
                     help="flash this bootloader ELF instead of building Debug/")
     args = ap.parse_args()
 
     if args.reset_only or args.elf:
         args.skip_build = True
-    ports = args.ports if args.ports else cfg.LOG_PORTS
 
     boot_repo = cfg.BOOT_REPO
     elf = Path(args.elf) if args.elf else Path(boot_repo) / "Debug" / "open_plc_cube_ide.elf"
@@ -152,7 +150,9 @@ def main():
     assert_target_reachable(cli)
 
     Section("Reset + capture" if args.reset_only else "Flash + capture")
-    open_ports = open_log_ports(ports)
+    # The self-test runs only when the board stays in the bootloader, which has
+    # no USB port 1: the boot log is read from the SRAM4 buffer over SWD.
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
 
     argv = ([str(cli), "-c", "port=SWD", "mode=UR", "-rst"] if args.reset_only
             else [str(cli), "-c", "port=SWD", "mode=UR", "-w", str(elf), "-rst"])
@@ -163,20 +163,19 @@ def main():
         if re.search(keep, line):
             print(line)
 
-    buf = read_log_ports(open_ports, args.seconds)
-    for k, v in buf.items():
-        Section("%s  (%d bytes)" % (k, len(v)))
-        if v:
-            print(v)
+    time.sleep(args.seconds)
+    allof = "\n".join(t for _, t in read_boot_log_swd(cli, since=mark) or [])
+    Section("boot log  (%d bytes)" % len(allof))
+    if allof:
+        print(allof)
 
     Section("BG1 verdict")
-    allof = "\n".join(buf.values())
-    if "SDRAM staging buffer OK" in allof:
+    if "[sys][BL] SDRAM staging buffer OK" in allof:
         Ok("PASS - staging buffer usable. Next: T1-07 (normal upload).")
     elif "SDRAM SELF-TEST FAILED" in allof:
         Fail("FAIL - SDRAM self-test failed. Fix FMC / power-up sequence before "
              "testing uploads.")
-    elif "APP Mod" in allof:
+    elif "[sys][BL] ** APP Mod" in allof:
         # MX_FMC_Init() lives in Phase 2 of main(), which only runs when the board
         # stays in the bootloader. A board with a valid application jumps at
         # main.c:185 and never reaches the self-test -- absence of the SDRAM line
@@ -185,11 +184,11 @@ def main():
         Warn("  The SDRAM self-test only runs when the board stays in the bootloader.")
         Warn("  Hold BOOT0 through the startup window, or use IAPTool to request upload mode.")
     elif not allof.strip():
-        Warn("No serial output at all.")
-        Warn("  Either every log port was busy (see above), or nothing is wired to UART4.")
-        Warn("  SWO/ITM carries the same log if the RS232 route is unavailable.")
+        Warn("No new record in the SRAM4 boot log.")
+        Warn("  Either the board did not boot, or this bootloader predates the boot log.")
+        Warn("  SWO/ITM carries the same lines.")
     else:
-        Warn("Serial output arrived but no SDRAM line - is this the new bootloader?")
+        Warn("Boot log arrived but no SDRAM line - is this the new bootloader?")
     return 0
 
 

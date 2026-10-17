@@ -91,11 +91,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from common import (Fail, Ok, Section, Warn, assert_target_reachable,  # noqa: E402
+from common import (board_ip, Fail, Ok, Section, Warn, assert_target_reachable,  # noqa: E402
                     cfg, get_go_bin, get_iap_tool, get_programmer_cli,
                     get_scratch_dir, get_scratch_file, nonblank_lines,
-                    open_log_ports, python_exe, read_log_ports, run_capture,
-                    run_while_draining, tcp_command, wait_for_board)
+                    boot_log_next, python_exe, read_boot_log_swd, run_capture,
+                    run_while_draining, tcp_command, wait_boot_log_swd,
+                    wait_for_board)
 
 # Core/Inc/usbd_cdc_flash.h: IAP_APP_ADDRESS, and IAP_APP_MAX_SIZE as the gap up
 # to the journal sector. Read back over SWD, which is the only view of the
@@ -108,14 +109,16 @@ APP_MAX_SIZE = 0x1C0000
 # move a running application into the bootloader without touching BOOT0.
 OVERSIZE_BYTES = 2000000
 
-# Printed on every boot in every ownership state, before the app/bootloader
+# The board's lines are read from the SRAM4 buffer over SWD: it is in the
+# bootloader here, which has no USB port 1.
+# Logged on every boot in every ownership state, before the app/bootloader
 # decision (IAP_server.c, bootloader_state_init). Its absence means the capture
 # failed, not that the board had nothing to say -- and an empty capture must
 # never be read as a pass.
-LOG_CAPTURE_PROOF = "Bootloader state:"
-LOG_APP_REJECTED = "App signature invalid or absent"
-LOG_APP_STARTED = "** APP Mod"
-LOG_IMAGE_ACCEPTED = "Checksum and signature OK"
+LOG_CAPTURE_PROOF = "[sys][BL] Bootloader state:"
+LOG_APP_REJECTED = "[sys][BL] ** App signature invalid or absent"
+LOG_APP_STARTED = "[sys][BL] ** APP Mod"
+LOG_IMAGE_ACCEPTED = "[sys][BL] Checksum and signature OK"
 
 # IAPTool's own words about the certificate it presented. The first one is what
 # separates "the app is signed by a delegated leaf" from "the app is signed by
@@ -196,17 +199,17 @@ def app_digest(cli, nbytes, tag):
     return hashlib.sha256(data).hexdigest()
 
 
-def reset_and_capture(cli, ports, seconds):
-    """Reset over ST-Link with the log ports already open, and return what came out."""
-    open_ports = open_log_ports(ports)
+def reset_and_capture(cli, seconds):
+    """Reset over ST-Link and return what the board logged meanwhile."""
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
     run_capture([cli, "-c", "port=SWD", "mode=UR", "-rst"])
-    text = "\n".join(read_log_ports(open_ports, seconds).values())
+    text = wait_boot_log_swd(cli, mark, seconds)
     for line in nonblank_lines(text):
         print("    | " + line)
     return text
 
 
-def upload(iap, image, ip, key, cert, ports, tail_seconds):
+def upload(iap, image, ip, key, cert, cli, tail_seconds):
     """One upload through the shipping tool. Returns (exit code, tool text, board text).
 
     ⚠️ The board is still working when IAPTool exits -- it is verifying the
@@ -215,25 +218,23 @@ def upload(iap, image, ip, key, cert, ports, tail_seconds):
     """
     out_path = get_scratch_file("t2_rot.out")
     err_path = get_scratch_file("t2_rot.err")
-    open_ports = open_log_ports(ports)
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
     argv = [iap, "ether", str(image), ip, "--key=%s" % key, "--cert=%s" % cert]
     print("  IAPTool ether %s %s --key=%s --cert=%s"
           % (Path(image).name, ip, Path(key).name, Path(cert).name))
-    rc, buf = run_while_draining(argv, open_ports, out_path, err_path)
-    tail = read_log_ports(open_ports, tail_seconds)      # also closes them
-    for k in buf:
-        buf[k] += tail.get(k, "")
+    rc, _ = run_while_draining(argv, {}, out_path, err_path)
+    board = wait_boot_log_swd(cli, mark, tail_seconds, until=LOG_APP_STARTED)
     tool = (Path(out_path).read_text(encoding="utf-8", errors="replace")
             + Path(err_path).read_text(encoding="utf-8", errors="replace"))
     for line in nonblank_lines(tool):
         print("    T | " + line)
-    serial = "\n".join(buf.values())
+    serial = board
     for line in nonblank_lines(serial):
         print("    B | " + line)
     return rc, tool, serial
 
 
-def move_to_bootloader(iap, ip, port, key, cert, ports):
+def move_to_bootloader(iap, ip, port, key, cert, cli):
     """Get a board that is running the application back into the bootloader.
 
     Offers an image larger than the application region: IAPTool performs its real
@@ -248,7 +249,7 @@ def move_to_bootloader(iap, ip, port, key, cert, ports):
     if not big.exists() or big.stat().st_size < OVERSIZE_BYTES:
         with open(str(big), "wb") as fh:
             fh.truncate(OVERSIZE_BYTES)
-    upload(iap, big, ip, key, cert, ports, 4)
+    upload(iap, big, ip, key, cert, cli, 4)
     # The refusal is the expected outcome here, so IAPTool's exit code says
     # nothing useful. Ask the board which mode it is in instead: getpubkey is a
     # bootloader command, so an answer to it IS the answer.
@@ -312,7 +313,7 @@ def build_precondition(st, args):
 
     Section("Precondition 3/4  upload the application signed by that leaf")
     rc, tool, serial = upload(st["iap"], st["bin"], st["ip"], old_leaf, old_cert,
-                              st["ports"], args.tail_seconds)
+                              st["cli"], args.tail_seconds)
     if rc != 0:
         Fail("the precondition upload failed (IAPTool exit %d)" % rc)
         return False
@@ -327,9 +328,9 @@ def build_precondition(st, args):
     Ok("  the board accepted an image signed by a leaf of the current root")
 
     Section("Precondition 4/4  the board actually runs it")
-    log = reset_and_capture(st["cli"], st["ports"], args.seconds)
+    log = reset_and_capture(st["cli"], args.seconds)
     if LOG_CAPTURE_PROOF not in log:
-        Fail("no boot log captured (%d bytes) - check the log ports above" % len(log))
+        Fail("no boot log captured (%d bytes) - is this bootloader new enough to keep the SRAM4 boot log?" % len(log))
         return False
     if LOG_APP_STARTED not in log:
         Fail("the board did not start the application (no %r)" % LOG_APP_STARTED)
@@ -351,7 +352,7 @@ def case_t2_12(st, args):
 
     print("  moving the board into the bootloader so setowner can be served")
     if not move_to_bootloader(st["iap"], st["ip"], args.port, st["old_leaf"],
-                              st["old_cert"], st["ports"]):
+                              st["old_cert"], st["cli"]):
         Fail("could not get the board into the bootloader")
         return SETUP
 
@@ -385,7 +386,7 @@ def case_t2_12(st, args):
         Warn("  run_setowner.py exited %d, but the board DID take the new root" % rc)
     Ok("  the board's root is now %s..." % now[:16])
 
-    log = reset_and_capture(st["cli"], st["ports"], args.seconds)
+    log = reset_and_capture(st["cli"], args.seconds)
     if LOG_CAPTURE_PROOF not in log:
         Warn("  no boot log captured (%d bytes); nothing was proved this round" % len(log))
         return SETUP
@@ -414,7 +415,7 @@ def case_t2_13(st, args):
         Warn("  (not a failure of this case, but say so before reading the rest)")
 
     rc, tool, _ = upload(st["iap"], st["bin"], st["ip"], st["old_leaf"],
-                         st["old_cert"], st["ports"], args.tail_seconds)
+                         st["old_cert"], st["cli"], args.tail_seconds)
     after = app_digest(st["cli"], st["compare_bytes"], "t2_13_after")
     if after is None:
         return SETUP
@@ -456,7 +457,7 @@ def case_t2_14(st, args):
     Ok("  leaf key %s, certificate %s" % (new_leaf.name, new_cert.name))
 
     rc, tool, serial = upload(st["iap"], st["bin"], st["ip"], new_leaf, new_cert,
-                              st["ports"], args.tail_seconds)
+                              st["cli"], args.tail_seconds)
     accepted = rc == 0 and LOG_IMAGE_ACCEPTED in serial
     if accepted:
         Ok("  the board accepted the image")
@@ -466,7 +467,7 @@ def case_t2_14(st, args):
         Warn("  IAPTool never said %r - was the certificate used at all?"
              % TOOL_CERT_ACCEPTED)
 
-    log = reset_and_capture(st["cli"], st["ports"], args.seconds)
+    log = reset_and_capture(st["cli"], args.seconds)
     if LOG_CAPTURE_PROOF not in log:
         Warn("  no boot log captured (%d bytes); nothing was proved this round" % len(log))
         return SETUP
@@ -500,12 +501,11 @@ def main():
                     help="how long to keep listening after IAPTool exits")
     ap.add_argument("--keydir", default="",
                     help="where the generated keys and certificates go")
-    ap.add_argument("--ports", nargs="*", default=None)
     args = ap.parse_args()
 
-    ip = args.ip or getattr(cfg, "BOARD_IP", "")
+    ip = args.ip or board_ip()
     if not ip:
-        Fail("need --ip (or set BOARD_IP in config/machine.py)")
+        Fail("need --ip (or BOARD_UID in config/machine.py)")
         return 2
     image = Path(args.bin)
     if not image.exists():
@@ -542,7 +542,6 @@ def main():
 
     cli = get_programmer_cli()
     st = {"ip": ip, "bin": image, "iap": iap, "cli": cli, "keydir": keydir,
-          "ports": args.ports if args.ports else cfg.LOG_PORTS,
           "compare_bytes": compare}
 
     Section("Setup")

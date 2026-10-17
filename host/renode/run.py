@@ -30,10 +30,11 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent.parent / "tools"))
 
 from build_image import build_copy  # noqa: E402
-from common import EXE, Fail, Ok, Section, cfg, get_iap_tool, get_scratch_dir, run_capture  # noqa: E402
+from common import (BOOT_LOG_ADDR, BOOT_LOG_SIZE, EXE, Fail, Ok, Section, cfg,  # noqa: E402
+                    get_iap_tool, get_scratch_dir, parse_boot_log, run_capture)
 
-FQBN = ("OpenPLC_Alpha:stm32:OPEN-PLC:pnum=PLC_H743,usb=CDCgen,xusb=FS,"
-        "upload_method=ethMethod,knxrole=dual_device")
+FQBN = ("OpenPLC_Alpha:stm32:OPEN-PLC:pnum=PLC_H743,usb=CDCgen,"
+        "upload_method=ethMethod")
 
 FLASH, FLASH_SIZE = 0x08000000, 2 << 20
 APP = 0x08020000
@@ -58,6 +59,29 @@ SD_IMAGE_SIZE = 64 << 20
 RENODE_TIMEOUT = 1800
 
 PLATFORM = HERE / "plc_h743.repl"
+
+
+def boot_log_commands():
+    """Monitor lines that dump the SRAM4 boot log ($PROD/docs/modules/M1/BOOT-LOG.md)
+    at the end of a run. The bootloader logs only there and on SWO, and the core's
+    system lines go there and to USB, which Renode does not model."""
+    return (['echo "BOOTLOG BEGIN"']
+            + ["sysbus ReadDoubleWord 0x%08X" % (BOOT_LOG_ADDR + 4 * i) for i in range(BOOT_LOG_SIZE // 4)]
+            + ['echo "BOOTLOG END"'])
+
+
+def boot_log_text(console):
+    """The boot log's lines from a console that ran boot_log_commands(), one per
+    line; "" when the dump is missing or the buffer is not valid."""
+    console = re.sub(r"\x1b\[[0-9;]*m", "", console)
+    if "BOOTLOG BEGIN" not in console:
+        return ""
+    body = console.rsplit("BOOTLOG BEGIN", 1)[1].split("BOOTLOG END", 1)[0]
+    words = [int(v, 16) for v in re.findall(r"(?m)^\s*(0x[0-9A-Fa-f]{1,8})\s*$", body)]
+    if len(words) < BOOT_LOG_SIZE // 4:
+        return ""
+    data = struct.pack("<%dI" % (BOOT_LOG_SIZE // 4), *words[:BOOT_LOG_SIZE // 4])
+    return "".join(t + "\n" for _, t in parse_boot_log(data))
 
 
 def symbols(nm, elf):
@@ -117,8 +141,6 @@ def run_renode(renode, work, sym, sd_image):
         "sysbus LoadBinary @%s/bank1.bin 0x%08X" % (w, FLASH),
         "sysbus LoadBinary @%s/bank2.bin 0x%08X" % (w, FLASH + FLASH_SIZE // 2),
         "cpu VectorTableOffset 0x%08X" % FLASH,
-        "uart4 CreateFileBackend @%s/uart4.txt true" % w,
-        "usart3 CreateFileBackend @%s/usart3.txt true" % w,
         # The card-detect pin reads "present" in Renode; without a card the
         # SDMMC model never answers CMD0 and setup() hangs.
         "machine SdCardFromFile @%s sysbus.sdmmc 0x%X false" % (sd_image.as_posix(), SD_IMAGE_SIZE),
@@ -131,6 +153,7 @@ def run_renode(renode, work, sym, sd_image):
         "sysbus.cpu PC",
         'cpu AddHook 0x%08X "self.InfoLog(\'HIT endloop\'); self.RemoveHooksAt(0x%08X)"' % (loop, loop),
         'emulation RunFor "00:00:%02d"' % TAIL_SECONDS,
+    ] + boot_log_commands() + [
         "q",
     ]
     (work / "run.resc").write_text("\n".join(lines) + "\n")
@@ -148,8 +171,13 @@ def run_renode(renode, work, sym, sd_image):
     return out
 
 
-def judge(out, work, app_bin):
-    uart4 = (work / "uart4.txt").read_text(errors="replace") if (work / "uart4.txt").exists() else ""
+# These wait in setup() for a PC to open the USB serial port (decision 124);
+# Renode has no USB host, so loop() is never reached.
+WAITS_FOR_USB_HOST = {"USB_Serial"}
+
+
+def judge(out, app_bin, name=""):
+    log = boot_log_text(out)
     m = re.search(r"END PC\s+(0x[0-9a-fA-F]+)", out)
     pc = int(m.group(1), 16) if m else None
     app = app_bin.read_bytes()
@@ -157,14 +185,15 @@ def judge(out, work, app_bin):
     stuck = 0 <= off < len(app) - 1 and struct.unpack_from("<H", app, off)[0] == 0xE7FE  # b .
     # Renode folds repeated log lines into "(N)", so count occurrences, not lines.
     checks = [
-        ("bootloader jumped into the app", "APP Mod" in uart4),
+        ("bootloader jumped into the app", "[sys][BL] ** APP Mod" in log),
         ("setup() entered once", out.count("HIT setup") == 1),
-        ("loop() entered", out.count("HIT loop") == 1),
-        ("loop() still entered at the end", out.count("HIT endloop") == 1),
         ("no fault", "HIT fault" not in out),
         ("PC readable and not parked on 'b .'", pc is not None and not stuck),
     ]
-    return [(name, ok) for name, ok in checks], pc
+    if name not in WAITS_FOR_USB_HOST:
+        checks[2:2] = [("loop() entered", out.count("HIT loop") == 1),
+                       ("loop() still entered at the end", out.count("HIT endloop") == 1)]
+    return checks, pc
 
 
 def main():
@@ -224,7 +253,7 @@ def main():
         elf, app_bin = build / (ex.name + ".ino.elf"), build / (ex.name + ".ino.bin")
         flash_banks(boot_bin, app_bin, iap, work)
         out = run_renode(renode, work, symbols(nm[-1], elf), sd_image)
-        checks, pc = judge(out, work, app_bin)
+        checks, pc = judge(out, app_bin, ex.name)
         for name, ok in checks:
             (Ok if ok else Fail)("  %s %s" % ("ok  " if ok else "FAIL", name))
         if all(ok for _, ok in checks):

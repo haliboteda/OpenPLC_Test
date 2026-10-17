@@ -41,28 +41,32 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, Section, Ok, Warn, Fail,  # noqa: E402
-                    assert_target_reachable,
+from common import (board_ip, Section, Ok, Warn, Fail,  # noqa: E402
+                    assert_target_reachable, boot_log_next,
                     get_go_bin, get_iap_tool, get_programmer_cli,
-                    get_scratch_file, nonblank_lines, open_log_ports,
-                    read_log_ports, run_capture, run_while_draining)
+                    get_scratch_file, nonblank_lines, read_boot_log_swd,
+                    run_capture, run_while_draining, wait_boot_log_swd)
 
 # IAP_APP_ADDRESS = FLASH_BASE | ADDRESS_VECTOR, Core/Inc/usbd_cdc_flash.h:50,58.
 APP_ADDR = "0x08020000"
+# Bootloader lines, read from the SRAM4 buffer over SWD: the board may stay in
+# the bootloader, which has no USB port 1.
+APP_MOD = "[sys][BL] ** APP Mod"
+ACCEPTED = "[sys][BL] Checksum and signature OK"
+REJECTED = "[sys][BL] ** App signature invalid or absent"
 
 
-def boot_log(cli, ports):
-    """Reset over SWD with the log ports already open, so the banner is caught."""
-    open_ports = open_log_ports(ports)
+def boot_log(cli):
+    """Reset over SWD and return what the board logged while booting."""
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
     run_capture([cli, "-c", "port=SWD", "mode=UR", "-rst"])
-    buf = read_log_ports(open_ports, 8)      # also closes them
-    all_text = "\n".join(buf.values())
+    all_text = wait_boot_log_swd(cli, mark, 8)
     for line in nonblank_lines(all_text):
         print("    | " + line)
     return all_text
 
 
-def flash_and_boot(what, iap, image_path, ip, ports):
+def flash_and_boot(what, iap, cli, image_path, ip):
     """Flash the image and report whether the board then boots it.
 
     ⚠️ DO NOT reset the board when IAPTool exits. IAPTool is done once the last
@@ -71,24 +75,20 @@ def flash_and_boot(what, iap, image_path, ip, ports):
     Resetting there lands in the middle of the erase/write and leaves exactly
     the damage this case is otherwise trying to create deliberately.
 
-    So: hold the log ports open across the whole flash and let the board reboot
-    itself, which it does on success. The board's own words are the verdict;
-    "File transfer complete" is IAPTool's account of its own sending, and says
-    nothing about what the board decided.
+    So: keep reading the boot log across the whole flash and let the board
+    reboot itself, which it does on success. The board's own words are the
+    verdict; "File transfer complete" is IAPTool's account of its own sending,
+    and says nothing about what the board decided.
     """
     Section(what)
     out_path = get_scratch_file("s3_flash.out")
     err_path = get_scratch_file("s3_flash.err")
-    open_ports = open_log_ports(ports)
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
 
-    _, buf = run_while_draining([iap, "ether", str(image_path), ip],
-                                open_ports, out_path, err_path)
-    # The board is still working here. Keep listening until it has written the
+    run_while_draining([iap, "ether", str(image_path), ip], {}, out_path, err_path)
+    # The board is still working here. Keep reading until it has written the
     # image and come back up.
-    tail = read_log_ports(open_ports, 15)     # also closes them
-    for k in buf:
-        buf[k] += tail.get(k, "")
-    serial = "\n".join(buf.values())
+    serial = wait_boot_log_swd(cli, mark, 15, until=APP_MOD)
     for line in nonblank_lines(serial):
         print("    | " + line)
 
@@ -99,10 +99,10 @@ def flash_and_boot(what, iap, image_path, ip, ports):
         for line in tool.splitlines()[-8:]:
             print("    " + line)
         return False
-    if "Checksum and signature OK" not in serial:
+    if ACCEPTED not in serial:
         Fail("the board did not accept the image (no 'Checksum and signature OK')")
         return False
-    if "** APP Mod" not in serial:
+    if APP_MOD not in serial:
         Fail("the board accepted the image but did not start the application")
         return False
     Ok("board accepted the image and booted it")
@@ -114,13 +114,11 @@ def main():
     ap.add_argument("--bin", required=True)
     ap.add_argument("--ip", default="")
     ap.add_argument("--no-restore", action="store_true")
-    ap.add_argument("--ports", nargs="*", default=None)
     args = ap.parse_args()
 
-    ports = list(args.ports if args.ports is not None else cfg.LOG_PORTS)
-    ip = args.ip or getattr(cfg, "BOARD_IP", "")
+    ip = args.ip or board_ip()
     if not ip:
-        Fail("need --ip (or set BOARD_IP in config/machine.py)")
+        Fail("need --ip (or BOARD_UID in config/machine.py)")
         return 2
     binpath = Path(args.bin).resolve()
     if not binpath.exists():
@@ -142,7 +140,7 @@ def main():
 
     # ----------------------------------------------- 1. prove the restore ----
     Section("1/4  prove the restore path BEFORE breaking anything")
-    if not flash_and_boot("flashing the restore image", iap, binpath, ip, ports):
+    if not flash_and_boot("flashing the restore image", iap, cli, binpath, ip):
         Fail("the restore image does not produce a bootable board -- refusing to break anything")
         return 2
     Ok("restore path proven; safe to proceed")
@@ -170,13 +168,13 @@ def main():
 
     # --------------------------------------------------- 3. the verdict ------
     Section("3/4  what does the board say now?")
-    log = boot_log(cli, ports)
+    log = boot_log(cli)
 
     why = []
-    if "** APP Mod" in log:
+    if APP_MOD in log:
         why.append("the board booted the application anyway -- the signature is NOT "
                    "re-checked at boot (C3 is false)")
-    if "App signature invalid or absent" not in log:
+    if REJECTED not in log:
         why.append("no 'App signature invalid or absent' line")
     if "metadata present" not in log:
         why.append("'metadata present' missing -- the journal lost its metadata too, "
@@ -202,7 +200,7 @@ def main():
         return 1 if verdict else 0
 
     Section("4/4  restoring the board")
-    if not flash_and_boot("flashing the restore image back", iap, binpath, ip, ports):
+    if not flash_and_boot("flashing the restore image back", iap, cli, binpath, ip):
         Fail("THE BOARD IS LEFT WITHOUT A BOOTABLE APPLICATION -- flash a valid image "
              "over ethernet or ST-Link")
         return 1

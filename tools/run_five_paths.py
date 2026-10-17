@@ -41,10 +41,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from common import (Fail, Ok, Section, Warn, banner, cfg,  # noqa: E402
-                    get_iap_tool, get_programmer_cli, open_log_ports,
-                    python_exe, read_log_ports, run_capture, tcp_command,
-                    wait_for_board)
+from common import (board_ip, Fail, Ok, Section, Warn, banner, cfg,  # noqa: E402
+                    boot_log_next, get_iap_tool, get_programmer_cli,
+                    python_exe, read_boot_log_swd, run_capture, tcp_command,
+                    wait_boot_log_swd, wait_for_board)
 
 PASS, FAIL, SETUP = "PASS", "FAIL", "SETUP"
 IAP_PORT = 56865
@@ -53,9 +53,11 @@ IAP_PORT = 56865
 # (owner_slot.c, IAP_server.c).
 TOOL_NO_ROOT = "This board has no root yet"
 TOOL_CLAIMED = re.compile(r"Claimed\. From now on this board runs only firmware signed by (\S+)")
-LOG_FACTORY_RESET = "FACTORY RESET DONE"
-LOG_APP_REFUSED = "App signature invalid or absent"
-LOG_APP_RUNS = "APP Mod"
+# Bootloader lines, read from the SRAM4 buffer over SWD: in path 2 the board
+# stays in the bootloader, which has no USB port 1.
+LOG_FACTORY_RESET = "[sys][BL] ** FACTORY RESET DONE"
+LOG_APP_REFUSED = "[sys][BL] ** App signature invalid or absent"
+LOG_APP_RUNS = "[sys][BL] ** APP Mod"
 
 
 class Round(object):
@@ -63,7 +65,7 @@ class Round(object):
 
     def __init__(self, args):
         self.args = args
-        self.ip = args.ip or cfg.BOARD_IP
+        self.ip = args.ip or board_ip()
         self.cdc = args.cdc or getattr(cfg, "CDC_PORT", "")
         self.results = []
         self.keys = {}          # name -> .pem path
@@ -190,11 +192,12 @@ def path_2(r):
             "until the system LED stays lit. Then let go.",
             "Path 2 proves a factory reset returns the board to no root."])
     if r.args.dry_run:
-        print("    (waits for %r on the log ports)" % LOG_FACTORY_RESET)
+        print("    (waits for %r in the SRAM4 boot log)" % LOG_FACTORY_RESET)
     else:
-        handles = open_log_ports(list(r.args.ports or cfg.LOG_PORTS))
-        buf = read_log_ports(handles, r.args.boot0_timeout, until=LOG_FACTORY_RESET)
-        if LOG_FACTORY_RESET not in "\n".join(buf.values()):
+        cli = get_programmer_cli()
+        mark = boot_log_next(read_boot_log_swd(cli) or [])
+        log = wait_boot_log_swd(cli, mark, r.args.boot0_timeout, until=LOG_FACTORY_RESET)
+        if LOG_FACTORY_RESET not in log:
             return r.record("2-a/T2-05", SETUP, "no factory reset seen within %d s"
                             % r.args.boot0_timeout)
     ok = r.record("2-a/T2-05", PASS, "the board reported %r" % LOG_FACTORY_RESET)
@@ -202,9 +205,9 @@ def path_2(r):
     # The application path 1 installed is signed by a root the board no
     # longer has: after a plain reset it must not start.
     if not r.args.dry_run:
-        handles = open_log_ports(list(r.args.ports or cfg.LOG_PORTS))
-        run_capture([str(get_programmer_cli()), "-c", "port=SWD", "mode=UR", "-rst"])
-        log = "\n".join(read_log_ports(handles, 12, until=LOG_APP_REFUSED).values())
+        mark = boot_log_next(read_boot_log_swd(cli) or [])
+        run_capture([str(cli), "-c", "port=SWD", "mode=UR", "-rst"])
+        log = wait_boot_log_swd(cli, mark, 12, until=LOG_APP_REFUSED)
         refused = LOG_APP_REFUSED in log and LOG_APP_RUNS not in log
         wait_for_board(r.ip, timeout=30)
         none = tcp_command(r.ip, IAP_PORT, "getpubkey").strip() == "none"
@@ -292,12 +295,11 @@ def main():
     ap.add_argument("--cdc", default="", help="the board's USB CDC port, for path 1")
     ap.add_argument("--elf", default="",
                     help="bootloader ELF path 0 flashes (default: $BOOT/Debug)")
-    ap.add_argument("--v1", default="../Output/probe-images/iap_probe_v1.bin")
-    ap.add_argument("--v2", default="../Output/probe-images/iap_probe_v2.bin")
+    ap.add_argument("--v1", default=str(HERE.parent / "Output/probe-images/iap_probe_v1.bin"))
+    ap.add_argument("--v2", default=str(HERE.parent / "Output/probe-images/iap_probe_v2.bin"))
     ap.add_argument("--owner-key", default="",
                     help="resume after path 2 with this owner key")
-    ap.add_argument("--keydir", default="../Output/five-paths-keys")
-    ap.add_argument("--ports", nargs="*", default=None)
+    ap.add_argument("--keydir", default=str(HERE.parent / "Output/five-paths-keys"))
     ap.add_argument("--from", dest="start", type=int, default=0,
                     help="resume at this path; 0 is factory state")
     ap.add_argument("--only", nargs="*", type=int, default=None)
@@ -313,7 +315,7 @@ def main():
         [n for n in sorted(PATHS) if n >= args.start]
 
     Section("the round")
-    print("  board  %s" % (args.ip or cfg.BOARD_IP))
+    print("  board  %s" % (args.ip or board_ip()))
     print("  paths  %s" % ", ".join(str(n) for n in wanted))
     print("  images %s -> %s" % (args.v1, args.v2))
     if args.dry_run:

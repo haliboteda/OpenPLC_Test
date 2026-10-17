@@ -6,6 +6,7 @@
  */
 
 #include "IAP_boot_handoff.h"
+#include "boot_log.h"
 #include "IAP_server.h"
 #include "bootloader_state.h"
 #include "iap_auth.h"
@@ -59,6 +60,9 @@ int main(int argc, char **argv)
 	hostmem_init(host_args.state_dir);
 	host_hal_init();
 	bridge_init(OPENPLC_SERVER_PORT, host_args.port, host_args.discovery_port);
+
+	/* As main.c: before the first printf, cold on a power-on reset. */
+	boot_log_init((boot_handoff_reset_rsr() & RCC_RSR_PORRSTF) != 0U);
 
 	printf("** Reset cause: %s\r\n", boot_handoff_reset_cause_str());
 	bootloader_state_init();

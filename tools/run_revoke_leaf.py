@@ -91,11 +91,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from common import (Fail, Ok, Section, Warn, assert_target_reachable,  # noqa: E402
+from common import (board_ip, Fail, Ok, Section, Warn, assert_target_reachable,  # noqa: E402
                     cfg, get_go_bin, get_iap_tool, get_programmer_cli,
                     get_scratch_dir, get_scratch_file, nonblank_lines,
-                    open_log_ports, read_log_ports, run_capture,
-                    run_while_draining, tcp_command, wait_for_board)
+                    boot_log_next, read_boot_log_swd, run_capture,
+                    run_while_draining, tcp_command, wait_boot_log_swd,
+                    wait_for_board)
 
 # Core/Inc/usbd_cdc_flash.h: IAP_APP_ADDRESS, and IAP_APP_MAX_SIZE as the gap up
 # to the journal sector. Read back over SWD, which is the only view of the
@@ -112,20 +113,22 @@ OVERSIZE_BYTES = 2000000
 # key a revocation record names it by.
 REVOKE_PREFIX_LEN = 16
 
-# Printed on every boot in every ownership state, before the app/bootloader
+# The board's lines are read from the SRAM4 buffer over SWD: it is in the
+# bootloader here, which has no USB port 1.
+# Logged on every boot in every ownership state, before the app/bootloader
 # decision (IAP_server.c, bootloader_state_init). Its absence means the capture
 # failed, not that the board had nothing to say -- and an empty capture must
 # never be read as a pass.
-LOG_CAPTURE_PROOF = "Bootloader state:"
-LOG_APP_REJECTED = "App signature invalid or absent"
-LOG_APP_STARTED = "** APP Mod"
-LOG_IMAGE_ACCEPTED = "Checksum and signature OK"
+LOG_CAPTURE_PROOF = "[sys][BL] Bootloader state:"
+LOG_APP_REJECTED = "[sys][BL] ** App signature invalid or absent"
+LOG_APP_STARTED = "[sys][BL] ** APP Mod"
+LOG_IMAGE_ACCEPTED = "[sys][BL] Checksum and signature OK"
 
 # IAPTool's own words about the certificate it presented.
 TOOL_CERT_ACCEPTED = "Certificate was issued by this board's root"
 
 # The board's TCP answer to a refused command. The reason it refuses ("signature
-# does not verify against the current owner") is printf'd to the SERIAL log, not
+# does not verify against the current owner") is printf'd to the boot log, not
 # returned over TCP -- so the TCP criterion is the refusal plus the state not
 # moving, which is what the case is actually about.
 BOARD_REFUSED = "Refused"
@@ -203,17 +206,17 @@ def app_digest(cli, nbytes, tag):
     return hashlib.sha256(data).hexdigest()
 
 
-def reset_and_capture(cli, ports, seconds):
-    """Reset over ST-Link with the log ports already open, and return what came out."""
-    open_ports = open_log_ports(ports)
+def reset_and_capture(cli, seconds):
+    """Reset over ST-Link and return what the board logged meanwhile."""
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
     run_capture([cli, "-c", "port=SWD", "mode=UR", "-rst"])
-    text = "\n".join(read_log_ports(open_ports, seconds).values())
+    text = wait_boot_log_swd(cli, mark, seconds)
     for line in nonblank_lines(text):
         print("    | " + line)
     return text
 
 
-def upload(iap, image, ip, key, cert, ports, tail_seconds):
+def upload(iap, image, ip, key, cert, cli, tail_seconds):
     """One upload through the shipping tool. Returns (exit code, tool text, board text).
 
     ⚠️ The board is still working when IAPTool exits -- it is verifying the
@@ -222,25 +225,23 @@ def upload(iap, image, ip, key, cert, ports, tail_seconds):
     """
     out_path = get_scratch_file("t2_rev.out")
     err_path = get_scratch_file("t2_rev.err")
-    open_ports = open_log_ports(ports)
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
     argv = [iap, "ether", str(image), ip, "--key=%s" % key, "--cert=%s" % cert]
     print("  IAPTool ether %s %s --key=%s --cert=%s"
           % (Path(image).name, ip, Path(key).name, Path(cert).name))
-    rc, buf = run_while_draining(argv, open_ports, out_path, err_path)
-    tail = read_log_ports(open_ports, tail_seconds)      # also closes them
-    for k in buf:
-        buf[k] += tail.get(k, "")
+    rc, _ = run_while_draining(argv, {}, out_path, err_path)
+    board = wait_boot_log_swd(cli, mark, tail_seconds, until=LOG_APP_STARTED)
     tool = (Path(out_path).read_text(encoding="utf-8", errors="replace")
             + Path(err_path).read_text(encoding="utf-8", errors="replace"))
     for line in nonblank_lines(tool):
         print("    T | " + line)
-    serial = "\n".join(buf.values())
+    serial = board
     for line in nonblank_lines(serial):
         print("    B | " + line)
     return rc, tool, serial
 
 
-def move_to_bootloader(iap, ip, port, key, cert, ports):
+def move_to_bootloader(iap, ip, port, key, cert, cli):
     """Get a board that is running the application back into the bootloader.
 
     Offers an image larger than the application region: IAPTool performs its real
@@ -254,7 +255,7 @@ def move_to_bootloader(iap, ip, port, key, cert, ports):
     if not big.exists() or big.stat().st_size < OVERSIZE_BYTES:
         with open(str(big), "wb") as fh:
             fh.truncate(OVERSIZE_BYTES)
-    upload(iap, big, ip, key, cert, ports, 4)
+    upload(iap, big, ip, key, cert, cli, 4)
     # The refusal is the expected outcome here, so IAPTool's exit code says
     # nothing useful. Ask the board which mode it is in instead: getpubkey is a
     # bootloader command, so an answer to it IS the answer.
@@ -289,10 +290,10 @@ def board_revoked_count_from(log):
     return int(m.group(1)) if m else None
 
 
-def board_free_slots(ip, port, cli, ports, seconds):
+def board_free_slots(ip, port, cli, seconds):
     """Free REVOCATION slots, read off a boot log. None when unreadable.
 
-    The count only appears on the serial log, so this costs a reset -- there
+    The count only appears in the boot log, so this costs a reset -- there
     is no TCP command that reports it.
 
     Revocations have lived in their own segment since format_ver 4, and the
@@ -301,12 +302,12 @@ def board_free_slots(ip, port, cli, ports, seconds):
     revoke spends no slot" pass no matter what a revocation did, because
     revocations never touch that segment.
     """
-    log = reset_and_capture(cli, ports, seconds)
+    log = reset_and_capture(cli, seconds)
     return board_free_slots_from(log)
 
 
 
-def move_to_bootloader_selfsigned(iap, ip, port, owner_key, ports):
+def move_to_bootloader_selfsigned(iap, ip, port, owner_key):
     """Bring a running application to the bootloader using the OWNER key alone.
 
     Same mechanism as move_to_bootloader (oversize image, real authenticated
@@ -319,12 +320,10 @@ def move_to_bootloader_selfsigned(iap, ip, port, owner_key, ports):
     if not big.exists() or big.stat().st_size < OVERSIZE_BYTES:
         with open(str(big), "wb") as fh:
             fh.truncate(OVERSIZE_BYTES)
-    open_ports = open_log_ports(ports)
     out_path = get_scratch_file("t2_rev_self.out")
     err_path = get_scratch_file("t2_rev_self.err")
     run_while_draining([iap, "ether", str(big), ip, "--key=%s" % owner_key],
-                       open_ports, out_path, err_path)
-    read_log_ports(open_ports, 3)
+                       {}, out_path, err_path)
     if not wait_for_board(ip, timeout=30.0, port=port):
         return False
     return re.fullmatch(r"[0-9a-fA-F]{128}",
@@ -415,7 +414,7 @@ def build_precondition(st, args):
     Section("Precondition 3/4  upload the application signed by the doomed leaf")
     rc, tool, serial = upload(st["iap"], st["bin"], st["ip"],
                               st["doomed_leaf"]["pem"], st["doomed_leaf"]["cert"],
-                              st["ports"], args.tail_seconds)
+                              st["cli"], args.tail_seconds)
     if rc != 0:
         Fail("the precondition upload failed (IAPTool exit %d)" % rc)
         return False
@@ -430,9 +429,9 @@ def build_precondition(st, args):
     Ok("  the board accepted an image signed by the doomed leaf")
 
     Section("Precondition 4/4  the board actually runs it")
-    log = reset_and_capture(st["cli"], st["ports"], args.seconds)
+    log = reset_and_capture(st["cli"], args.seconds)
     if LOG_CAPTURE_PROOF not in log:
-        Fail("no boot log captured (%d bytes) - check the log ports above" % len(log))
+        Fail("no boot log captured (%d bytes) - is this bootloader new enough to keep the SRAM4 boot log?" % len(log))
         return False
     if LOG_APP_STARTED not in log:
         Fail("the board did not start the application (no %r)" % LOG_APP_STARTED)
@@ -448,7 +447,7 @@ def build_precondition(st, args):
     Section("Precondition 4/4b  move the board into the bootloader")
     if not move_to_bootloader(st["iap"], st["ip"], args.port,
                               st["doomed_leaf"]["pem"], st["doomed_leaf"]["cert"],
-                              st["ports"]):
+                              st["cli"]):
         Fail("could not get the board into the bootloader")
         return False
     Ok("  the board is in the bootloader and answering")
@@ -526,7 +525,7 @@ def case_t2_15(st, args):
     # appended at generation+1 but never becomes effective.
     Ok("  revocation sent; effective generation %d (unchanged, as designed)" % after)
 
-    log = reset_and_capture(st["cli"], st["ports"], args.seconds)
+    log = reset_and_capture(st["cli"], args.seconds)
     if LOG_CAPTURE_PROOF not in log:
         Fail("  no boot log captured (%d bytes)" % len(log))
         return SETUP
@@ -558,7 +557,7 @@ def app_revoked_says(st, args, expect_revoked):
     Self-signed, because the leaf under test is revoked by now.
     """
     if not move_to_bootloader_selfsigned(st["iap"], st["ip"], args.port,
-                                         args.current_key, st["ports"]):
+                                         args.current_key):
         Fail("  could not reach the bootloader; nothing was asked")
         return SETUP
     out, rc = run_capture([st["iap"], "getapprevoked", st["ip"]])
@@ -601,7 +600,7 @@ def case_t2_16(st, args):
 
     rc, tool, serial = upload(st["iap"], st["bin"], st["ip"],
                               st["doomed_leaf"]["pem"], st["doomed_leaf"]["cert"],
-                              st["ports"], args.tail_seconds)
+                              st["cli"], args.tail_seconds)
     verdict = PASS
     if rc == 0:
         Fail("  the upload SUCCEEDED (IAPTool exit 0) - the revocation did not hold")
@@ -632,7 +631,7 @@ def case_t2_17(st, args):
     Section("T2-17  a leaf that was NOT revoked still works (control)")
     rc, tool, serial = upload(st["iap"], st["bin"], st["ip"],
                               st["spared_leaf"]["pem"], st["spared_leaf"]["cert"],
-                              st["ports"], args.tail_seconds)
+                              st["cli"], args.tail_seconds)
     verdict = PASS
     if rc != 0:
         Fail("  the upload failed (IAPTool exit %d) - revocation hit the wrong leaf," % rc)
@@ -644,7 +643,7 @@ def case_t2_17(st, args):
     else:
         Ok("  the board accepted an image signed by the spared leaf")
 
-    log = reset_and_capture(st["cli"], st["ports"], args.seconds)
+    log = reset_and_capture(st["cli"], args.seconds)
     if LOG_CAPTURE_PROOF not in log:
         Fail("  no boot log captured (%d bytes)" % len(log))
         return SETUP
@@ -676,17 +675,17 @@ def case_t2_19_20(st, args):
     """
     Section("T2-19  a second, different leaf can also be revoked")
     if not move_to_bootloader_selfsigned(st["iap"], st["ip"], args.port,
-                                         args.current_key, st["ports"]):
+                                         args.current_key):
         Fail("  could not get the board into the bootloader")
         return SETUP
 
-    before_log = reset_and_capture(st["cli"], st["ports"], args.seconds)
+    before_log = reset_and_capture(st["cli"], args.seconds)
     revoked_before = board_revoked_count_from(before_log)
     if revoked_before is None:
         Fail("  could not read the revoked count before the second revocation")
         return SETUP
     if not move_to_bootloader_selfsigned(st["iap"], st["ip"], args.port,
-                                         args.current_key, st["ports"]):
+                                         args.current_key):
         Fail("  could not get the board back into the bootloader")
         return SETUP
 
@@ -700,7 +699,7 @@ def case_t2_19_20(st, args):
         Fail("  revoking the second leaf failed (IAPTool exit %d)" % rc)
         verdict = FAIL
 
-    log = reset_and_capture(st["cli"], st["ports"], args.seconds)
+    log = reset_and_capture(st["cli"], args.seconds)
     if LOG_CAPTURE_PROOF not in log:
         Fail("  no boot log captured")
         return SETUP
@@ -734,7 +733,7 @@ def case_t2_19_20(st, args):
     else:
         Ok("  the board answered 'already revoked'")
 
-    free_after = board_free_slots(st["ip"], args.port, st["cli"], st["ports"], args.seconds)
+    free_after = board_free_slots(st["ip"], args.port, st["cli"], args.seconds)
     if (free_mid is None) or (free_after is None):
         Fail("  could not read the free-slot count around the repeat")
         return SETUP
@@ -768,12 +767,11 @@ def main():
                     help="how long to keep listening after IAPTool exits")
     ap.add_argument("--keydir", default="",
                     help="where the generated keys and certificates go")
-    ap.add_argument("--ports", nargs="*", default=None)
     args = ap.parse_args()
 
-    ip = args.ip or getattr(cfg, "BOARD_IP", "")
+    ip = args.ip or board_ip()
     if not ip:
-        Fail("need --ip (or set BOARD_IP in config/machine.py)")
+        Fail("need --ip (or BOARD_UID in config/machine.py)")
         return 2
     image = Path(args.bin)
     if not image.exists():
@@ -807,7 +805,6 @@ def main():
 
     cli = get_programmer_cli()
     st = {"ip": ip, "bin": image, "iap": iap, "cli": cli, "keydir": keydir,
-          "ports": args.ports if args.ports else cfg.LOG_PORTS,
           "compare_bytes": compare}
 
     Section("Setup")

@@ -7,11 +7,11 @@
 #include "main.h"
 #include "boot_selfupgrade.h"
 #include "fmc.h"
-#include "usart.h"
 #include "usbd_cdc_if.h"
 #include "hostctl.h"
 
-void Disable_RX_RS232(void) { }
+/* The stand-in's printf goes straight to stdout, not through the boot log. */
+void boot_log_flush_stdout(void) { (void)fflush(stdout); }
 bool iap_sdram_selftest_passed(void) { return true; }
 uint8_t CDC_Transmit_FS(uint8_t *buf, uint16_t len) { (void)buf; (void)len; return USBD_OK; }
 

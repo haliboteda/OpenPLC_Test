@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, Section, Ok, Warn, Fail, get_go_bin, get_output_dir,  # noqa: E402
+from common import (board_ip, cfg, Section, Ok, Warn, Fail, get_go_bin, get_output_dir,  # noqa: E402
                     run_capture, tcp_command)
 
 # Must match OWNER_FORMAT_VER in the bootloader's owner_slot.h; P2 checks it.
@@ -60,9 +60,7 @@ def signed_prefix(generation, new_key_hex, uid_hex):
     uid = bytes.fromhex(uid_hex)
     if len(uid) != 12:
         raise ValueError("uid must be 24 hex characters, got %r" % uid_hex)
-    # byte 1 was `slots` (always 5) through format_ver 2; v3 (2026-09-20)
-    # dropped it for a reserved byte, always 0, that keeps every later field
-    # at the same offset. See open_plc_cube_ide/IAPServer/owner_slot.h.
+    # Layout: open_plc_cube_ide/IAPServer/owner_slot.h.
     return (bytes([0x4F, 0])                      # type 'O', reserved0
             + struct.pack("<H", OWNER_FORMAT_VER)
             + struct.pack("<I", generation)
@@ -96,9 +94,9 @@ def main():
     ap.add_argument("--bad-signature", action="store_true")
     args = ap.parse_args()
 
-    ip = args.ip or getattr(cfg, "BOARD_IP", "")
+    ip = args.ip or board_ip()
     if not ip:
-        Fail("need --ip (or set BOARD_IP in config/machine.py)")
+        Fail("need --ip (or BOARD_UID in config/machine.py)")
         return 2
     current = Path(args.current_key)
     if not current.exists():

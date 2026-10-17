@@ -39,64 +39,71 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, Section, Ok, Warn, Fail, banner, get_iap_tool,  # noqa: E402
+from common import (board_ip, Section, Ok, Warn, Fail, banner, get_iap_tool,  # noqa: E402
                     get_programmer_cli, get_scratch_file, local_ip_for,
-                    open_log_ports, target_voltage)
+                    read_boot_log_swd, target_voltage)
 
-# Exactly the strings the bootloader prints. Anchored on IAPServer/IAP_server.c
+# Exactly the lines the bootloader logs. Anchored on IAPServer/IAP_server.c
 # so a wording change breaks the test loudly instead of making it wait forever:
-#   :350  ". Staging in SDRAM."                     transfer starts, flash safe
-#   :92   "Erasing application region ("            the risky window opens
-#   :431  "Checksum and signature OK. Rebooting..." the upgrade finished
-#   :573  "App signature invalid or absent"         the T1-22 verdict
+#   ". Staging in SDRAM."                     transfer starts, flash safe
+#   "Erasing application region ("            the risky window opens
+#   "Checksum and signature OK. Rebooting..." the upgrade finished
+#   "App signature invalid or absent"         the T1-22 verdict
 STAGING = "Staging in SDRAM"
-ERASING = "Erasing application region"
-FINISHED = "Checksum and signature OK"
-APP_INVALID = "App signature invalid or absent"
-BOOT_BANNER = "Checking Starting Mod"
-APP_MOD = "APP Mod"
+ERASING = "[sys][BL] Erasing application region"
+FINISHED = "[sys][BL] Checksum and signature OK"
+APP_INVALID = "[sys][BL] ** App signature invalid or absent"
+BOOT_BANNER = "[sys][BL] ** Checking Starting Mod"
+APP_MOD = "[sys][BL] ** APP Mod"
+# One STM32_Programmer_CLI read takes about a second; the ST-Link serves one
+# client at a time, so the voltage probe shares this lock.
+SWD_LOCK = threading.Lock()
 
 
 class LogTail:
-    """Streams the log ports into one growing buffer on a background thread.
+    """The board's SRAM4 boot log, read over SWD on a background thread into one
+    growing buffer. During the upgrade the board is in the bootloader, which has
+    no USB port 1, so this is the only live view of the windows below.
 
-    common.read_log_ports() drains for a fixed number of seconds and closes the
-    ports, which cannot drive a decision that has to be made while the transfer
-    is still running.
+    A power-on clears the buffer and numbers records from 0 again; that is
+    taken as a fresh start and its records are appended.
     """
 
-    def __init__(self, handles):
-        self.handles = handles
+    POLL_S = 0.5
+
+    def __init__(self, cli):
+        self.cli = cli
         self.text = ""
         self.last_byte_at = time.monotonic()
+        self._next = None   # sequence number of the next record not yet appended
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self):
+        with SWD_LOCK:
+            recs = read_boot_log_swd(self.cli)
+        self._next = recs[-1][0] + 1 if recs else 0
         self._thread.start()
 
     def _run(self):
         while not self._stop.is_set():
-            for h in self.handles.values():
-                try:
-                    n = h.in_waiting
-                    if n:
-                        chunk = h.read(n).decode("utf-8", "replace")
-                        with self._lock:
-                            self.text += chunk
-                            self.last_byte_at = time.monotonic()
-                except Exception:
-                    pass
-            time.sleep(0.05)
+            with SWD_LOCK:
+                recs = read_boot_log_swd(self.cli)
+            if recs:
+                if recs[-1][0] < self._next - 1:
+                    self._next = recs[0][0]   # restarted after a power-on
+                new = [t for s, t in recs if s >= self._next]
+                if new:
+                    self._next = recs[-1][0] + 1
+                    with self._lock:
+                        self.text += "".join(t + "\n" for t in new)
+                        self.last_byte_at = time.monotonic()
+            self._stop.wait(self.POLL_S)
 
     def stop(self):
         self._stop.set()
-        for h in self.handles.values():
-            try:
-                h.close()
-            except Exception:
-                pass
+        self._thread.join(30)
 
     def seen(self, needle, since=0):
         with self._lock:
@@ -148,7 +155,7 @@ def discovery_answers(ip, port=56865, timeout=0.6):
         s.close()
 
 
-def usable_image(path, iaptool):
+def usable_image(path, iaptool, key=None):
     """The image exists, and something can sign it.
 
     Deliberately not "the .sig sidecar exists": IAPTool signs in memory whenever
@@ -160,7 +167,7 @@ def usable_image(path, iaptool):
     p = Path(path)
     if not p.is_file():
         return None, "%s does not exist" % p
-    has_key = (Path(iaptool).parent / "keys" / "fw_signing_key.pem").exists()
+    has_key = bool(key) or (Path(iaptool).parent / "keys" / "fw_signing_key.pem").exists()
     has_sidecar = any(Path(str(p)[:-4] + s).exists() or
                       p.with_suffix(p.suffix + s).exists()
                       for s in (".sig",))
@@ -206,7 +213,7 @@ def ticker(label, expect=None):
     """A one-line live clock for wait_for's on_tick.
 
     The operator has to act inside a window of a few seconds and cannot see the
-    serial log, so counting in their head against somebody else's message is the
+    board's log, so counting in their head against somebody else's message is the
     only cue they otherwise have -- which is how the first T1-22 attempts were
     missed by seconds in both directions. This puts the clock on their screen.
     """
@@ -224,15 +231,14 @@ def ticker(label, expect=None):
 
 def run_once(case, args, cli, iaptool, image, ip):
     """One attempt. Returns "pass", "fail", "missed" or "setup"."""
-    ports = [p for p in (args.ports or cfg.LOG_PORTS) if p]
-    handles = open_log_ports(ports)
-    if not handles:
-        Fail("no log port could be opened; S4 is judged from the board's log")
+    if read_boot_log_swd(cli) is None:
+        Fail("cannot read the SRAM4 boot log over SWD; S4 is judged from the board's log")
         return "setup"
-    tail = LogTail(handles)
+    tail = LogTail(cli)
     tail.start()
 
-    v0 = target_voltage(cli)
+    with SWD_LOCK:
+        v0 = target_voltage(cli)
     print("target voltage before the cut: %s" % ("%.2fV" % v0 if v0 else "unknown"))
 
     Section("starting the ethernet upgrade")
@@ -292,7 +298,8 @@ def run_once(case, args, cli, iaptool, image, ip):
             if now < state["next_probe"]:
                 return False
             state["next_probe"] = now + 4.0
-            state["v"] = target_voltage(cli)
+            with SWD_LOCK:
+                state["v"] = target_voltage(cli)
             return state["v"] is None or state["v"] <= 1.0
 
         cut_seen = wait_for(rail_is_down, args.cut_timeout,
@@ -358,9 +365,10 @@ def run_once(case, args, cli, iaptool, image, ip):
             return "fail"
 
         Section("recovering: uploading the same image again")
+        # Mark before the upload: the board reboots before IAPTool returns.
+        mark2 = len(tail.snapshot())
         rec = subprocess.run(cmd, capture_output=True, text=True,
                              timeout=args.recover_timeout)
-        mark2 = len(tail.snapshot())
         got_back = wait_for(lambda: tail.seen(BOOT_BANNER, mark2) >= 0, 120)
         time.sleep(args.settle)
         after2 = tail.snapshot()[mark2:]
@@ -385,8 +393,7 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--case", choices=["a", "b"], required=True)
     ap.add_argument("--bin", help="signed application image to upload")
-    ap.add_argument("--ip", help="board address (default: BOARD_IP from config)")
-    ap.add_argument("--ports", action="append", help="log port; repeatable")
+    ap.add_argument("--ip", help="board address (default: found by BOARD_UID)")
     ap.add_argument("--key", help="passed to IAPTool as --key")
     ap.add_argument("--retry", type=int, default=1,
                     help="attempts allowed when the window is missed (default 1)")
@@ -411,9 +418,9 @@ def main():
                                     "during the transfer" if args.case == "a"
                                     else "during erase and write"))
 
-    ip = args.ip or getattr(cfg, "BOARD_IP", "")
+    ip = args.ip or board_ip()
     if not ip:
-        Fail("no board address: pass --ip or set BOARD_IP in config/machine.py")
+        Fail("no board address: pass --ip or set BOARD_UID in config/machine.py")
         return 2
 
     iaptool = get_iap_tool()
@@ -429,7 +436,7 @@ def main():
         Fail("--bin is required: a signed application image to upload")
         Warn("  sign one with:  IAPTool sign <app.bin>")
         return 2
-    image, why = usable_image(args.bin, iaptool)
+    image, why = usable_image(args.bin, iaptool, args.key)
     if not image:
         Fail(why)
         return 2

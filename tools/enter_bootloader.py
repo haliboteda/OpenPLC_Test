@@ -19,6 +19,10 @@ the SRAM4 handoff record over SWD.
 The alternative is holding BOOT0 through the startup window, which needs hands on
 the board.
 
+Proof it worked: the board answers discovery as the bootloader. The bootloader's
+own lines (the size refusal) reach USB port 1 only once the app runs again, so
+they are not read here.
+
 """
 
 import argparse
@@ -30,9 +34,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from common import (Fail, Ok, Section, Warn, cfg, decode_serial,  # noqa: E402
-                    get_iap_tool, get_scratch_file, open_log_ports,
-                    read_log_ports)
+from common import (board_ip, board_role, Fail, Ok, Section, close_ports,  # noqa: E402
+                    get_iap_tool, get_scratch_file, open_board_log,
+                    run_while_draining)
 
 # Anything over IAP_APP_MAX_SIZE (1,835,008) does; the content is never read.
 OVERSIZE_BYTES = 2000000
@@ -49,70 +53,51 @@ def oversize_image():
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--ip", default=None)
-    ap.add_argument("--seconds", type=int, default=6)
-    ap.add_argument("--ports", nargs="*", default=None)
+    ap.add_argument("--seconds", type=int, default=6,
+                    help="how long to wait for the board to answer as the bootloader")
     ap.add_argument("--key", default=None,
                     help="owner private key (PEM). The reboot request is signed, and a claimed "
                          "board rejects one signed by any other key. Omit it to use this "
                          "computer's default key.")
     args = ap.parse_args()
 
-    ports = args.ports if args.ports else cfg.LOG_PORTS
-    ip = args.ip or getattr(cfg, "BOARD_IP", "")
+    ip = args.ip or board_ip()
     if not ip:
-        Fail("need --ip (or set BOARD_IP in config)")
+        Fail("need --ip (or BOARD_UID in config/machine.py)")
         return 1
 
     big = oversize_image()
 
     Section("Requesting bootloader")
-    open_ports = open_log_ports(ports)
-
+    # The app's refusal of an unsigned reboot is a system line on USB port 1.
+    open_ports = open_board_log(sys_only=True)
     out_file = get_scratch_file("eb.out")
     err_file = get_scratch_file("eb.err")
-    with open(str(out_file), "wb") as so, open(str(err_file), "wb") as se:
-        cmd = [str(get_iap_tool()), "ether", str(big), ip]
-        if args.key:
-            cmd += ["--key", args.key]
-        proc = subprocess.Popen(cmd, stdout=so, stderr=se)
-
-        # Drain while IAPTool runs: the driver's buffer overruns on a long
-        # transfer and the interesting lines are the ones lost.
-        buf = {k: "" for k in open_ports}
-        while proc.poll() is None:
-            for k, h in open_ports.items():
-                try:
-                    n = h.in_waiting
-                    if n:
-                        buf[k] += decode_serial(h.read(n))
-                except Exception:
-                    pass
-            time.sleep(0.06)
-
-    tail = read_log_ports(open_ports, args.seconds)
-    for k, v in tail.items():
-        buf[k] = buf.get(k, "") + v
+    cmd = [str(get_iap_tool()), "ether", str(big), ip]
+    if args.key:
+        cmd += ["--key", args.key]
+    _, buf = run_while_draining(cmd, open_ports, out_file, err_file)
+    close_ports(open_ports)
 
     allof = "\n".join(buf.values())
     for k, v in buf.items():
         if v:
-            Section("serial %s" % k)
+            Section("board log %s" % k)
             print(v)
 
     Section("Verdict")
-    # The refusal line is the proof that nothing was written, not just that the
-    # upload failed somewhere.
-    if "Invalid flash size" in allof:
-        Ok("board is in the bootloader; the oversized image was refused before "
-           "anything was touched")
-        return 0
-    if "UPLOAD Mod" in allof:
-        Warn("board entered upload mode, but the refusal line was not seen - check the log")
+    deadline = time.monotonic() + max(args.seconds, 2)
+    role = board_role(ip)
+    while not role.startswith("BOOTLD") and time.monotonic() < deadline:
+        time.sleep(0.5)
+        role = board_role(ip)
+    if role.startswith("BOOTLD"):
+        Ok("board is in the bootloader (discovery role %s)" % role)
         return 0
     # The board says why, and this script already has its log. Not reading it
     # was the whole problem: "does not appear to be in the bootloader" sent
     # people looking at cabling when the board had answered in plain words.
-    if "Rejected unauthenticated" in allof:
+    if "[sys] Rejected unauthenticated" in allof:
         Fail("the board refused the reboot request: it is CLAIMED, and this "
              "request was signed by a key it does not trust")
         if args.key:

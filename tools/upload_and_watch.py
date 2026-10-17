@@ -1,5 +1,7 @@
-"""Run a real upload through IAPTool while capturing the board's serial log, then
-judge it against what SDRAM staging is supposed to do.
+"""Run a real upload through IAPTool while capturing the board's USB port 1 (its
+system log and what the sketch prints with Serial) and, if given, RS232, then
+judge it against what SDRAM staging is supposed to do. The bootloader's lines
+arrive on USB port 1 once the new app runs.
 
 Exit code is the verdict: 0 every check passed, 1 at least one failed. Until
 2026-09-17 this always exited 0 because Fail() only colours text, so the
@@ -14,15 +16,19 @@ what gets exercised has to be the code path customers use.
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, Section, Ok, Warn, Fail, close_ports,  # noqa: E402
-                    emit_file, get_iap_tool, get_scratch_file, open_log_ports,
+from common import (board_ip, cfg, Section, Ok, Warn, Fail, APP_BOOTED,  # noqa: E402
+                    close_ports, emit_file, get_iap_tool, get_scratch_file,
+                    open_board_log, open_rs232_ports, read_log_ports,
                     run_while_draining)
 
 TAIL_S = 6
+# Wait for USB port 1 after IAPTool exits: the board verifies, copies and boots.
+BOOT_WAIT_S = 30
 
 
 def verdict(all_text, exit_code, expect_banner=None):
@@ -36,9 +42,9 @@ def verdict(all_text, exit_code, expect_banner=None):
     Section("Verdict")
     fails = unknowns = 0
 
-    if "SDRAM staging buffer OK" in all_text:
+    if "[sys][BL] SDRAM staging buffer OK" in all_text:
         Ok("  self-test: staging buffer usable")
-    elif "SDRAM SELF-TEST FAILED" in all_text:
+    elif "[sys][BL] ** SDRAM SELF-TEST FAILED" in all_text:
         Fail("  self-test: FAILED")
         fails += 1
     else:
@@ -52,8 +58,8 @@ def verdict(all_text, exit_code, expect_banner=None):
         unknowns += 1
 
     # The whole point of staging: the erase must come after verification.
-    i_erase = all_text.find("Erasing application region")
-    i_verif = all_text.find("Transfer complete, verifying")
+    i_erase = all_text.find("[sys][BL] Erasing application region")
+    i_verif = all_text.find("[sys][BL] Transfer complete, verifying")
     if i_erase >= 0 and i_verif >= 0 and i_erase > i_verif:
         Ok("  erase happened AFTER verification - this is the change working")
     elif i_erase >= 0 and i_verif >= 0:
@@ -103,15 +109,18 @@ def main():
     ap.add_argument("--ip", default="")
     ap.add_argument("--cdc", default="")
     ap.add_argument("--tail-seconds", type=int, default=TAIL_S)
-    ap.add_argument("--ports", nargs="*", default=None)
+    ap.add_argument("--ports", nargs="*", default=None,
+                    help="RS232 adapter port(s) to capture too, for a sketch that prints "
+                         "with RS232; default RS232_PORT")
     args = ap.parse_args()
 
-    ports = list(args.ports if args.ports is not None else cfg.LOG_PORTS)
+    rs232 = getattr(cfg, "RS232_PORT", "")
+    ports = list(args.ports if args.ports is not None else ([rs232] if rs232 else []))
     ip = args.ip
     if not ip and not args.cdc:
-        ip = getattr(cfg, "BOARD_IP", "")
+        ip = board_ip()
     if not ip and not args.cdc:
-        Fail("need --ip or --cdc (or set BOARD_IP / CDC_PORT in config)")
+        Fail("need --ip or --cdc (or BOARD_UID / CDC_PORT in config/machine.py)")
         return 1
     image = Path(args.bin)
     if not image.exists():
@@ -119,14 +128,14 @@ def main():
         return 1
     iaptool = get_iap_tool()
 
-    # The CDC port is the board talking to us; it cannot also be a passive log port.
-    if args.cdc:
-        ports = [p for p in ports if p != args.cdc]
-
     print("image: %s  (%s B)" % (image, format(image.stat().st_size, ",d")))
 
-    Section("Log ports")
-    open_ports = open_log_ports(ports)
+    Section("Ports")
+    open_ports = open_rs232_ports(ports)
+    # A CDC upload needs USB port 1 itself; the log is opened after it, and the
+    # app then sends what the bootloader logged meanwhile.
+    if not args.cdc:
+        open_ports.update(open_board_log())
 
     Section("Upload")
     argv = ["cdc", str(image), args.cdc] if args.cdc else ["ether", str(image), ip]
@@ -143,6 +152,12 @@ def main():
                                  get_scratch_file("iaptool.out"),
                                  get_scratch_file("iaptool.err"),
                                  tail_seconds=args.tail_seconds)
+    if args.cdc:
+        open_ports.update(open_board_log(fresh=False))
+    tail = read_log_ports(open_ports, BOOT_WAIT_S,
+                          until=re.escape(args.expect_banner or APP_BOOTED))    # also closes them
+    for k, v in tail.items():
+        buf[k] = buf.get(k, "") + v
     close_ports(open_ports)
 
     Section("IAPTool output (exit %d)" % rc)

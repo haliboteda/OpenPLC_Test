@@ -1,11 +1,14 @@
 """T3-06 -- run the own-library examples on the real board, one at a time.
 
-    python3 tools/run_examples.py --cdc COM11 --rs485 COM16 --rs232 COM17
+    python3 tools/run_examples.py --rs485 COM16
     python3 tools/run_examples.py --only RS485_Echo --skip-upload
+    python3 tools/run_examples.py --only Relays --upload ether
 
 Each example is compiled from the installed board package, uploaded over USB
-CDC, and judged by the PC from the example's own human-readable output. The
-examples carry no machine lines; the criteria live in EXAMPLES below.
+CDC or, with --upload ether, over Ethernet to the running app, and judged by the PC from the example's own human-readable output, which
+is on Serial, the board's USB port (decision 147); RS232_Echo's echo is on the
+RS232 terminals. The examples carry no machine lines; the criteria live in
+EXAMPLES below.
 Decided in $PROD/maps/core-examples-on-board/issues/EXB-01-how-does-the-script-judge-an-example.md
 
 Steps that need a person run first, so the operator can leave once they are
@@ -14,7 +17,8 @@ a person can see is a single y/n key. No measured value is recorded.
 Decided in $PROD/maps/core-examples-on-board/issues/EXB-05-how-does-the-script-ask-for-a-human-step.md
 
 The CAN analyser is the CANable from can_send.py, found by USB id unless --can
-is given. --skip-upload misses the examples that only print at start-up.
+is given. With --skip-upload the examples reprint their one-shot output when
+the port is opened (R3-23).
 
 Exit 0 = every example run passed, 1 = one failed, 2 = setup problem.
 """
@@ -27,12 +31,12 @@ import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, Section, Ok, Fail, banner, decode_serial,  # noqa: E402
+from common import (board_ip, cfg, Section, Ok, Fail, banner, decode_serial,  # noqa: E402
                     get_iap_tool, get_scratch_dir, run_capture, wait_for_board)
 import ymodem  # noqa: E402
 
-FQBN = ("OpenPLC_Alpha:stm32:OPEN-PLC:pnum=PLC_H743,usb=CDCgen,xusb=FS,"
-        "upload_method=cdcMethod,knxrole=dual_device")
+FQBN = ("OpenPLC_Alpha:stm32:OPEN-PLC:pnum=PLC_H743,usb=CDCgen,"
+        "upload_method=cdcMethod")
 
 def di_bits(n):
     """The DI_Inputs line with only DI n at 1 (n = 0 for all off)."""
@@ -81,10 +85,18 @@ EXAMPLES = [
     {
         "name": "Relays",
         "lib": "OpenPLC_Ports",
-        "ready": ("cdc", r"Relays: each relay closes for 1 s, in order\."),
+        "ready": ("cdc", r"Relays: closes RY1\.\.RY6 one at a time, then stops"),
         "steps": [
-            ("expect", [("cdc", r"RY6 closed")], 10.0),
-            ("ask", "Do RY1..RY6 each click on and off, in order (it repeats)?"),
+            ("expect", [("cdc", r"done, all relays open")], 10.0),
+            ("ask", "Did RY1..RY6 each click on and off once, in order, and then stop?"),
+            ("send", "cdc", b"r 101\n"),
+            ("expect", [("cdc", r"rounds = 101\r?\nwarning: over 100 rounds")], 2.0),
+            ("send", "cdc", b"i 500\n"),
+            ("expect", [("cdc", r"interval = 500 ms\r?\nwarning: under 1000 ms")], 2.0),
+            ("send", "cdc", b"g\n"),
+            ("expect", [("cdc", r"run: 101 round\(s\), 500 ms per relay")], 2.0),
+            ("send", "cdc", b"s\n"),
+            ("expect", [("cdc", r"stopped, all relays open")], 2.0),
         ],
     },
     {
@@ -105,6 +117,24 @@ EXAMPLES = [
             ("expect", [("cdc", r"AO1 = AO2 = 20\.0 mA")], 20.0),
             ("ask", "Do both meters step 0, 5, 10, 15, 20 mA, 3 s each "
                     "(it repeats)?"),
+        ],
+    },
+    {
+        "name": "DO_PWM",
+        "lib": "OpenPLC_Ports",
+        "ready": ("cdc", r"DO_PWM: type <output 1-8> <duty 0-100>"),
+        "setup": "a load and a meter (DC volts) on DO3",
+        "steps": [
+            ("send", "cdc", b"3 50\n"),
+            ("expect", [("cdc", r"DO3 = 50 % at 1000 Hz; DO7 off")], 2.0),
+            ("ask", "Does the meter on DO3 read about half the supply voltage?"),
+            ("send", "cdc", b"r 12\n"),
+            ("expect", [("cdc", r"resolution 12 bits, full scale 4095")], 2.0),
+            ("send", "cdc", b"3 50\n"),
+            ("expect", [("cdc", r"DO3 = 50 % at 1000 Hz; DO7 off")], 2.0),
+            ("ask", "At 12 bits, does the meter on DO3 still read about half the supply voltage?"),
+            ("send", "cdc", b"3 0\n"),
+            ("expect", [("cdc", r"DO3 = 0 % at 1000 Hz")], 2.0),
         ],
     },
     {
@@ -133,7 +163,7 @@ EXAMPLES = [
         "steps": [
             ("send", "rs232", b"EXB-PING-3\n"),
             ("expect", [("rs232", r"EXB-PING-3\n"),
-                        ("cdc", r"RS232 got 0x45")], 2.0),
+                        ("cdc", r"RS232_Echo: got 11 bytes")], 2.0),
         ],
     },
     {
@@ -171,10 +201,10 @@ EXAMPLES = [
     {
         "name": "SD_FileReceive",
         "lib": "OpenPLC_Ports",
-        "ready": ("cdc", r"SD_FileReceive: send a file with YMODEM on RS232\."),
+        "ready": ("cdc", r"SD_FileReceive: send a file with YMODEM on USB\."),
         "steps": [
             ("expect", [("cdc", r"SD: card inserted\r?\n")], 3.0),
-            ("ymodem", "rs232", "EXB.BIN",
+            ("ymodem", "cdc", "EXB.BIN",
              bytes((i * 7 + 3) & 0xFF for i in range(3000))),
         ],
     },
@@ -191,27 +221,30 @@ EXAMPLES = [
     {
         "name": "SDRAM_Basic",
         "lib": "OpenPLC_SDRAM",
-        "ready": ("rs232", r"SDRAM ready, \d+ MB free"),
+        "ready": ("cdc", r"SDRAM ready, \d+ MB free"),
         "steps": [
-            ("expect", [("rs232", r"mismatches: 0\r?\n")], 5.0),
+            ("expect", [("cdc", r"mismatches: 0\r?\n")], 5.0),
         ],
     },
     {
         "name": "SDRAM_DataLogger",
         "lib": "OpenPLC_SDRAM",
-        "ready": ("rs232", r"=== SDRAM data logger ==="),
+        "ready": ("cdc", r"=== SDRAM data logger ==="),
         "steps": [
-            ("expect", [("rs232", r"press 'd' for a dump")], 5.0),
-            ("send", "rs232", b"d"),
-            ("expect", [("rs232", r"samples held: \d+")], 10.0),
+            ("expect", [("cdc", r"press 'd' for a dump")], 5.0),
+            ("send", "cdc", b"d"),
+            ("expect", [("cdc", r"samples held: \d+")], 10.0),
         ],
     },
 ]
 
-# The board re-enumerates after the upload; the sketch then waits up to 3 s
-# for the host to open the port before it prints its banner.
+# The board re-enumerates after the upload; the sketch does not wait for the
+# host and prints its banner when the port is opened (R3-23).
 REOPEN_S = 15.0
 READY_S = 8.0
+# After an Ethernet upload nothing is reopened, so the banner wait also covers
+# the bootloader verifying and starting the new app.
+ETHER_READY_S = REOPEN_S + READY_S
 HUMAN_S = 120.0
 
 
@@ -229,30 +262,44 @@ def ports_of(ex):
             used |= {k for k, _ in st[1 if st[0] == "expect" else 2]}
         elif st[0] in ("range", "ymodem"):
             used.add(st[1])
-    return used | {"cdc"}
+    return used
 
 
-def build_and_upload(ex, cdc, key):
-    """Returns 0 to carry on, or the exit code to stop with."""
+def check_args(upload, ip, cdc, chosen, skip_upload=False):
+    """The setup error for these choices, or "" if there is none."""
+    if upload == "ether" and not skip_upload and not ip:
+        return ("--upload ether needs the board's IP: give --ip, or set "
+                "BOARD_UID in config/machine.py so it is found")
+    needs_cdc = upload == "cdc" or any(
+        "cdc" in ports_of(e) for e in chosen)
+    if needs_cdc and not cdc:
+        return "need --cdc (or set CDC_PORT in config/machine.py)"
+    return ""
+
+
+def build_and_upload(ex, target, key, fqbn=FQBN, upload="cdc"):
+    """target: the CDC port, or the board's IP for upload="ether".
+    The image does not depend on the upload_method menu, so one FQBN serves
+    both. Returns 0 to carry on, or the exit code to stop with."""
     cli = getattr(cfg, "ARDUINO_CLI", "")
     if not cli or not Path(cli).exists():
         Fail("arduino-cli not found. Set ARDUINO_CLI in config/machine.py")
         return 2
     build = get_scratch_dir() / ("exb_" + ex["name"])
     out, rc = run_capture([cli, "compile", "--config-file",
-                           cfg.ARDUINO_CLI_CONFIG, "--fqbn", FQBN,
+                           cfg.ARDUINO_CLI_CONFIG, "--fqbn", fqbn,
                            "--build-path", build, sketch_dir(ex)])
     if rc != 0:
-        print("\n".join(out.splitlines()[-5:]))
+        print(out)
         Fail("compile failed")
         return 2
     binary = build / (ex["name"] + ".ino.bin")
-    argv = [get_iap_tool(), "cdc", str(binary), cdc]
+    argv = [get_iap_tool(), upload, str(binary), target]
     if key:
         argv.append("--key=%s" % key)
     out, rc = run_capture(argv)
     if rc != 0:
-        print("\n".join(out.splitlines()[-8:]))
+        print(out)
         Fail("upload failed (IAPTool exit %d)" % rc)
         return 2
     Ok("uploaded")
@@ -274,8 +321,19 @@ def wait_for(ports, bufs, want, seconds):
     """Reads every port into bufs until each (port, regex) in want matches."""
     deadline = time.time() + seconds
     while time.time() < deadline:
-        for k, sp in ports.items():
-            bufs[k] += decode_serial(sp.read(4096))
+        for k, sp in list(ports.items()):
+            try:
+                bufs[k] += decode_serial(sp.read(4096))
+            except Exception:
+                # The CDC port can vanish under us: the bootloader's USB device
+                # is still enumerated when IAPTool returns, then the app's
+                # replaces it. Reopen instead of failing.
+                if k != "cdc":
+                    raise
+                sp.close()
+                import serial
+                ports[k] = open_retry(serial, sp.port,
+                                      max(deadline - time.time(), 1.0))
         if all(re.search(rx, bufs[k]) for k, rx in want):
             return []
     return [(k, rx) for k, rx in want if not re.search(rx, bufs[k])]
@@ -367,7 +425,7 @@ def run_steps(ex, ports, bufs):
                 return 1, ""
             want = r"SD: wrote %s, %d bytes, crc32=%08X" % (
                 re.escape(name), len(data), zlib.crc32(data))
-            missing = wait_for(ports, bufs, [("cdc", want)], 10.0)
+            missing = wait_for(ports, bufs, [(port, want)], 10.0)
             if missing:
                 report_missing(missing, bufs, 10.0)
                 return 1, ""
@@ -381,29 +439,45 @@ def run_steps(ex, ports, bufs):
     return 0, ""
 
 
-def run_one(serial, ex, names, aux, key, skip_upload):
+def run_one(serial, ex, names, aux, key, skip_upload, upload="cdc", ip=""):
     """aux: the non-CDC ports, opened before the upload so nothing printed at
     start-up is missed. Returns (rc, note); rc 2 = stop the run."""
+    early = {}
     if not skip_upload:
-        rc = build_and_upload(ex, names["cdc"], key)
+        if upload == "ether":
+            # The app being replaced may have printed this example's banner
+            # already; only what the new one prints counts.
+            for sp in aux.values():
+                sp.reset_input_buffer()
+        drain = Drain(aux)
+        try:
+            rc = build_and_upload(ex, ip if upload == "ether" else names["cdc"],
+                                  key, upload=upload)
+        finally:
+            early = drain.done()
         if rc:
             return rc, ""
     ports = {k: v for k, v in aux.items() if k in ports_of(ex)}
+    # A CDC upload keeps the CDC port open as before; an Ethernet upload opens
+    # it only for an example that talks on it.
+    if upload == "cdc" or "cdc" in ports_of(ex):
+        try:
+            ports["cdc"] = open_retry(serial, names["cdc"], REOPEN_S)
+        except Exception as e:
+            Fail("cannot open port: %s" % e)
+            return 2, ""
+    ready_s = ETHER_READY_S if upload == "ether" and not skip_upload else READY_S
     try:
-        ports["cdc"] = open_retry(serial, names["cdc"], REOPEN_S)
-    except Exception as e:
-        Fail("cannot open port: %s" % e)
-        return 2, ""
-    try:
-        bufs = {k: "" for k in ports}
+        bufs = {k: early.get(k, "") for k in ports}
         rport, rrx = ex["ready"]
-        if wait_for(ports, bufs, [(rport, rrx)], READY_S):
+        if wait_for(ports, bufs, [(rport, rrx)], ready_s):
             Fail("no banner /%s/ on %s" % (rrx, rport))
             print(bufs[rport][-400:])
             return 1, ""
         return run_steps(ex, ports, bufs)
     finally:
-        ports["cdc"].close()
+        if "cdc" in ports:
+            ports["cdc"].close()
 
 
 def open_aux(serial, names, needed):
@@ -420,19 +494,47 @@ def open_aux(serial, names, needed):
     return aux
 
 
+class Drain:
+    """Reads the aux ports while compile and upload run. Left unread, the
+    driver's ~4 KiB receive queue overflows on a chatty previous app plus the
+    bootloader's upload log, and the new app's banner is dropped."""
+
+    def __init__(self, aux):
+        import threading
+        self.aux, self.text = aux, {k: "" for k in aux}
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        while not self.stop.is_set():
+            for k, sp in self.aux.items():
+                self.text[k] += decode_serial(sp.read(4096))
+
+    def done(self):
+        self.stop.set()
+        self.thread.join()
+        return self.text
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--only", default="")
     ap.add_argument("--cdc", default=getattr(cfg, "CDC_PORT", ""))
-    ap.add_argument("--rs485", default="",
+    ap.add_argument("--rs485", default=getattr(cfg, "RS485_PORT", ""),
                     help="the USB-RS485 adapter wired to A10/A11")
-    ap.add_argument("--rs232", default="",
-                    help="the RS232 adapter wired to C05/C06")
+    ap.add_argument("--rs232", default=getattr(cfg, "RS232_PORT", ""),
+                    help="the RS232 adapter wired to C05/C06, for RS232_Echo")
     ap.add_argument("--can", default="",
                     help="the CANable's port, if it is not found by USB id")
     ap.add_argument("--key", default="",
                     help="owner private key, for a claimed board")
     ap.add_argument("--skip-upload", action="store_true")
+    ap.add_argument("--upload", choices=("cdc", "ether"), default="cdc",
+                    help="cdc: IAPTool cdc over --cdc; ether: IAPTool ether to "
+                         "--ip, the running app reboots into the bootloader")
+    ap.add_argument("--ip", default="",
+                    help="the board's IP, for --upload ether; default: found by BOARD_UID")
     args = ap.parse_args()
 
     try:
@@ -440,15 +542,18 @@ def main():
     except ImportError:
         Fail("pyserial is not installed: python -m pip install pyserial")
         return 2
-    if not args.cdc:
-        Fail("need --cdc (or set CDC_PORT in config/machine.py)")
-        return 2
     names = {"cdc": args.cdc, "rs485": args.rs485, "rs232": args.rs232,
              "can": args.can}
 
     chosen = [e for e in EXAMPLES if not args.only or e["name"] == args.only]
     if not chosen:
         Fail("no example named %s" % args.only)
+        return 2
+    if args.upload == "ether" and not args.skip_upload and not args.ip:
+        args.ip = board_ip()
+    err = check_args(args.upload, args.ip, args.cdc, chosen, args.skip_upload)
+    if err:
+        Fail(err)
         return 2
 
     needed = set().union(*(ports_of(e) for e in chosen)) - {"cdc"}
@@ -475,7 +580,7 @@ def main():
         for ex in chosen:
             Section(ex["name"])
             rc, note = run_one(serial, ex, names, aux, args.key,
-                               args.skip_upload)
+                               args.skip_upload, args.upload, args.ip)
             if rc == 2:
                 return 2
             if rc == 0:

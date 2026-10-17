@@ -10,30 +10,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
 typedef SOCKET sock_t;
 #define BAD_SOCK INVALID_SOCKET
 #define close_sock closesocket
 static uint64_t now_ms(void) { return GetTickCount64(); }
-#else
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <time.h>
-#include <unistd.h>
-typedef int sock_t;
-#define BAD_SOCK (-1)
-#define close_sock close
-static uint64_t now_ms(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000U + (uint64_t)ts.tv_nsec / 1000000U;
-}
-#endif
 
 /* One TCP segment, as lwIP hands them over: a command longer than this arrives
  * in pieces, which IAP_data_recv() has to reassemble on the board too. */
@@ -82,10 +64,8 @@ static u16_t real_port(u16_t fw)
 
 void bridge_init(u16_t fw_port, u16_t real, u16_t discovery_port)
 {
-#ifdef _WIN32
 	WSADATA wsa;
 	WSAStartup(MAKEWORD(2, 2), &wsa);
-#endif
 	s_fw_port = fw_port;
 	s_real_port = real;
 	s_disc_port = discovery_port;

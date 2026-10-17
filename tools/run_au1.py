@@ -3,6 +3,7 @@
     python3 tools/run_au1.py                   full run, prompts you to pull the plug
     python3 tools/run_au1.py --count 12        take 12 nonces per phase instead of 8
     python3 tools/run_au1.py --ip 192.168.0.7  override the address from config
+    python3 tools/run_au1.py --key owner.pem   sign the reboot into the bootloader with this key
     python3 tools/run_au1.py --resume          keep the nonces already collected and go
                                                straight to waiting for the power cut
 
@@ -21,15 +22,16 @@ Exit 0 = T1-17 passed, 1 = it failed, 2 = the run could not be set up.
 import argparse
 import datetime
 import json
+import re
 import socket
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, GOOS_DIR, EXE, Section, Ok, Warn, Fail,  # noqa: E402
-                    banner, close_ports, get_go_bin, get_programmer_cli,
-                    get_scratch_file, local_ip_for, open_log_ports,
+from common import (board_ip, cfg, GOOS_DIR, EXE, Section, Ok, Warn, Fail,  # noqa: E402
+                    APP_BOOTED, banner, close_ports, get_go_bin, get_programmer_cli,
+                    get_scratch_file, local_ip_for, open_board_log,
                     python_exe, read_log_ports, run_capture, run_emit,
                     target_voltage)
 
@@ -81,15 +83,15 @@ def wait_board_state(ip, udp_port, present, what, minutes, local_ip=None):
     return False
 
 
-def enter_bootloader(ip, ports):
+def enter_bootloader(ip, key=None):
     """Run the Python enter_bootloader and return (captured text, exit code).
 
     Captured, not just printed, so a failure can show what the bootloader said.
     """
     argv = [python_exe(), str(Path(__file__).resolve().parent / "enter_bootloader.py"),
             "--ip", ip]
-    if ports:
-        argv += ["--ports"] + list(ports)
+    if key:
+        argv += ["--key", key]
     out, rc = run_capture(argv)
     print(out, end="" if out.endswith("\n") else "\n")
     return out, rc
@@ -104,17 +106,17 @@ def main():
     # board, and a timeout here throws away a phase 1 that was perfectly good.
     ap.add_argument("--wait-minutes", type=int, default=20)
     ap.add_argument("--resume", action="store_true")
-    ap.add_argument("--ports", nargs="*", default=None)
+    ap.add_argument("--key", default=None,
+                    help="owner private key, for the signed reboot into the bootloader")
     args = ap.parse_args()
 
-    ports = list(args.ports if args.ports is not None else cfg.LOG_PORTS)
-    ip = args.ip or getattr(cfg, "BOARD_IP", "")
+    ip = args.ip or board_ip()
     # Resolved once, not per probe: this loop polls every 0.7s for up to
     # --wait-minutes, and netifquery is a `go run` (compiles), too slow to
     # call on every tick.
     local_ip = local_ip_for(ip) if ip else None
     if not ip:
-        Fail("need --ip (or set BOARD_IP in config/machine.py)")
+        Fail("need --ip (or BOARD_UID in config/machine.py)")
         return 2
 
     test_tool = get_go_bin("TestCase")
@@ -149,7 +151,7 @@ def main():
     else:
         if args.resume:
             Warn("--resume given but %s does not exist; collecting phase 1 now" % state_file)
-        _, rc = enter_bootloader(ip, ports)
+        _, rc = enter_bootloader(ip, args.key)
         if rc != 0:
             Fail("could not park the board in the bootloader")
             return 2
@@ -194,12 +196,13 @@ def main():
     print("  Capturing the boot log while it comes up.")
     print()
 
-    # Hold the log ports open across power-up so the boot log is captured.
-    open_ports = open_log_ports(ports)
+    # USB port 1 appears once the app runs; the app then sends this boot's
+    # lines from the buffer, the bootloader's first.
+    open_ports = open_board_log(sys_only=True, fresh=False)
     if not wait_board_state(ip, args.port, True, "the board to answer again", args.wait_minutes, local_ip=local_ip):
         close_ports(open_ports)
         return 2
-    boot_log = "".join(read_log_ports(open_ports, 3).values())
+    boot_log = "".join(read_log_ports(open_ports, 30, until=re.escape(APP_BOOTED)).values())
 
     if boot_log.strip():
         Section("boot log")
@@ -208,7 +211,7 @@ def main():
     # ------------------------------------------------------------ phase 2 ----
     Section("T1-17 phase 2 -- collecting nonces after the power cut")
 
-    _, eb_rc = enter_bootloader(ip, ports)
+    _, eb_rc = enter_bootloader(ip, args.key)
     if eb_rc != 0:
         Fail("board came back but could not be parked in the bootloader")
         return 2
@@ -216,10 +219,10 @@ def main():
     verdict = run_emit([test_tool, "T1-17", "--ip=%s" % ip, "--port=%s" % args.port,
                         "--state=%s" % state_file, "--phase=2", "--count=%d" % args.count])
 
-    if "Backup domain was lost" in boot_log:
+    if "[sys][BL] ** Backup domain was lost" in boot_log:
         Fail("  the board itself reports the backup domain was lost -- replay protection is weakened")
         verdict = 1
-    elif "Backup domain retained" in boot_log:
+    elif "[sys][BL] Backup domain retained" in boot_log:
         Ok("  board reports: Backup domain retained")
 
     Section("result")

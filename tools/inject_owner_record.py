@@ -31,12 +31,13 @@ import argparse
 import re
 import struct
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, Section, Ok, Fail,  # noqa: E402
-                    assert_target_reachable, get_programmer_cli, get_scratch_file,
-                    open_log_ports, read_log_ports, run_capture, tcp_command)
+from common import (board_ip, cfg, Section, Ok, Fail,  # noqa: E402
+                    assert_target_reachable, boot_log_next, get_programmer_cli,
+                    get_scratch_file, read_boot_log_swd, run_capture, tcp_command)
 from reset_board_to_factory_state import read_bytes  # noqa: E402
 
 # Must match $BOOT/IAPServer/owner_slot.h and bootloader_state.c.
@@ -52,11 +53,8 @@ MARKER_MAGIC = 0x4C353153                          # "S15L"
 # 'O' slot i lives at OWNER_OFFSET + i * RECORD_SIZE; this script only writes 'O'.
 RECORD_SIZE = 160
 OWNER_FORMAT_VER = 4
-# The format this firmware no longer accepts, for --v1 -- named for the flag,
-# not for what it writes: v3 is the format immediately before this one, and is
-# exactly as rejected as an actual v1 record would be (record_is_structurally_valid()
-# only ever compares against the CURRENT OWNER_FORMAT_VER, so any wrong number
-# proves the same thing).
+# Written by --v1. Any format_ver other than the current one is rejected the
+# same way (record_is_structurally_valid() compares for equality only).
 PREVIOUS_FORMAT_VER = 3
 UID_LEN = 12
 
@@ -67,12 +65,8 @@ INTERESTING = re.compile(r"Owner slot|Bootloader state|Sector 15|APP Mod|UPLOAD 
 def record(generation, format_ver, flags, key_hex, filler, uid=b"", record_type=0x4F):
     """One 160-byte 'O' record. prev_sig and reserved stay zero.
 
-    Byte 1 was `slots` through format_ver 2; v3 dropped it (nothing ever read
-    it) in favour of a reserved byte that keeps every later field at the same
-    offset, so this always writes 0 there regardless of which format_ver is
-    being produced -- a --v1 record differs from a real one only in the
-    format_ver field itself, which is the one thing record_is_structurally_valid()
-    actually checks.
+    Byte 1 is reserved and always 0, so a --v1 record differs from a real one
+    only in format_ver. Layout: open_plc_cube_ide/IAPServer/owner_slot.h.
     """
     rec = bytearray(RECORD_SIZE)
     rec[0] = record_type                                # 'O' (0x4F); 'R' is a separate 32-byte layout
@@ -117,7 +111,7 @@ def main():
                     help="carry another board's uid, as a copied record would")
     ap.add_argument("--restore", action="store_true",
                     help="empty the root area; everything else in sector 15 is kept")
-    ap.add_argument("--ip", default=getattr(cfg, "BOARD_IP", ""))
+    ap.add_argument("--ip", default="", help="default: found by BOARD_UID")
     ap.add_argument("--port", default="56865")
     ap.add_argument("--also-unsigned", type=int, default=0,
                     help="add a second, unsigned record at this generation")
@@ -149,6 +143,7 @@ def main():
                 uid = bytes(range(1, UID_LEN + 1))
                 print("  uid: another board's (%s)" % uid.hex())
             else:
+                args.ip = args.ip or board_ip()
                 uid = board_uid(args.ip, args.port)
                 if uid is None:
                     Fail("could not read this board's uid over TCP at %s:%s -- "
@@ -214,14 +209,17 @@ def main():
     print("  calibration, metadata and marker kept; root area replaced")
 
     Section("flashing")
-    open_ports = open_log_ports(cfg.LOG_PORTS)
+    # The bootloader's lines, read from the SRAM4 buffer over SWD: the board
+    # may stay in the bootloader, which has no USB port 1.
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
     text, _ = run_capture([cli, "-c", "port=SWD", "mode=UR", "-w", str(tmp),
                            hex(STATE_SECTOR_BASE), "-rst"])
     for line in text.splitlines():
         if re.search(r"Download|verified|Error|Reset", line):
             print("  " + line)
 
-    all_text = "\n".join(read_log_ports(open_ports, args.seconds).values())
+    time.sleep(args.seconds)
+    all_text = "\n".join(t for _, t in read_boot_log_swd(cli, since=mark) or [])
 
     Section("boot log")
     for line in all_text.splitlines():
@@ -229,7 +227,7 @@ def main():
             print("    | " + line)
 
     Section("result")
-    if "Owner slot:" not in all_text:
+    if "[sys][BL] Owner slot:" not in all_text:
         Fail("no 'Owner slot:' line - is this bootloader new enough?")
         return 1
     Ok("flashed; read the line above against what this record was meant to be")

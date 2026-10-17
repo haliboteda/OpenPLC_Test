@@ -61,7 +61,8 @@ REPO_GUESS = TESTTOOL_DIR
 # the state this script exists to fix.
 sys.path.insert(0, str(TOOLS_DIR))
 from platform_info import (PLATFORM, IS_WIN, EXE, A15_DIR, CUBE_PLUG,  # noqa: E402,F401
-                           Section, Ok, Warn, Fail)
+                           IDE_CLI_REL, Section, Ok, Warn, Fail, cube_layout,
+                           discover_boards)
 
 HOME = Path.home()
 
@@ -134,41 +135,13 @@ def cubeide_roots():
             str(HOME / "st" / "stm32cubeide*"), str(HOME / "stm32cubeide*")]
 
 
-def detect_git_bash():
-    """Git Bash, which is what runs compile_tool.sh on Windows.
-
-    ⚠️ NOT whatever `bash` resolves to. On Windows that is System32\\bash.exe,
-    the WSL launcher: it is on PATH by default, it is not a shell, and with no
-    distribution installed it prints an install hint and exits non-zero - which
-    reads as a build failure rather than as a missing tool.
-
-    Derived from git itself, so a non-default install location is followed.
-    """
-    if not IS_WIN:
-        return shutil.which("bash")
-    git = shutil.which("git")
-    if git:
-        root = Path(git).resolve().parent.parent   # <root>/cmd/git.exe
-        for rel in ("usr/bin/bash.exe", "bin/bash.exe"):
-            cand = root / rel
-            if cand.exists():
-                return str(cand)
-    for r in (r"C:\Program Files\Git", r"C:\Program Files (x86)\Git",
-              r"D:\Program Files\Git", r"D:\Git", r"C:\Git"):
-        for rel in ("usr/bin/bash.exe", "bin/bash.exe"):
-            cand = Path(r) / rel
-            if cand.exists():
-                return str(cand)
-    return None
-
-
 def detect_cubeide():
     for r in cubeide_roots():
         for hit in sorted(glob.glob(r)):
-            # The install root is the directory holding STM32CubeIDE/plugins.
+            # The install root is the directory holding the plugins dir.
             # Matching on the name alone picks up shortcuts and unpacked
             # archives that no tool can be run from.
-            if (Path(hit) / "STM32CubeIDE" / "plugins").is_dir():
+            if cube_layout(hit)[0].is_dir():
                 return hit
     return None
 
@@ -190,7 +163,7 @@ def detect_ide():
     the only part of it any script here uses."""
     for r in ide_roots():
         for hit in sorted(glob.glob(r)):
-            if (Path(hit) / "resources/app/lib/backend/resources" / ("arduino-cli" + EXE)).exists():
+            if (Path(hit) / IDE_CLI_REL).exists():
                 return hit
     return None
 
@@ -198,10 +171,10 @@ def detect_ide():
 def detect_arduino_cli():
     ide = RESOLVED.get("IDE")
     if ide:
-        p = Path(ide) / "resources/app/lib/backend/resources" / ("arduino-cli" + EXE)
+        p = Path(ide) / IDE_CLI_REL
         if p.exists():
             return str(p)
-    return None
+    return shutil.which("arduino-cli")
 
 
 def detect_arduino_cli_config():
@@ -216,6 +189,10 @@ def detect_renode():
     if IS_WIN:
         return first_existing([r"D:\Soft\renode\renode.exe",
                                r"C:\Program Files\Renode\bin\Renode.exe"])
+    if PLATFORM == "macos":
+        # Renode's macOS package; launcher names not verified on a real Mac.
+        return first_existing(["/Applications/Renode.app/Contents/MacOS/renode",
+                               "/Applications/Renode.app/Contents/MacOS/macos_run.command"])
     return None
 
 
@@ -256,10 +233,10 @@ def detect_host_cc():
     return None
 
 
-def detect_log_ports():
+def detect_rs232_ports():
     """Ports that exist RIGHT NOW, most plausible first.
 
-    This is a guess and cannot be anything else: the log port is whichever one
+    This is a guess and cannot be anything else: the RS232 port is whichever one
     the RS232 adapter enumerated as, and if the adapter is unplugged it is not
     here to be found. Unplugged is also the normal state of a desk between
     sessions -- on this Windows machine the registry held only two virtual ports
@@ -304,7 +281,7 @@ def detect_log_ports():
         found.sort(key=rank)
         if all(decoy.search(d) for d, _ in found):
             NOTES.append("the only serial ports here look virtual or motherboard "
-                         "(%s) -- plug the RS232 adapter in and re-run, or --set LOG_PORTS=COM5,COM4"
+                         "(%s) -- plug the RS232 adapter in and re-run, or --set RS232_PORT=COM5"
                          % ", ".join("%s=%s" % (d, p) for d, p in found))
         return [p for _, p in found]
 
@@ -326,16 +303,27 @@ def detect_log_ports():
         if not ordered:
             NOTES.append("no /dev/cu.usbserial* or /dev/cu.usbmodem* right now -- "
                          "plug the RS232 adapter in and re-run, or "
-                         "--set LOG_PORTS=/dev/cu.usbserial-1410")
+                         "--set RS232_PORT=/dev/cu.usbserial-1410")
         return ordered or None
 
     # /dev/ttyUSB* is FTDI and CH340; /dev/ttyACM* is CDC, including the ST-Link
-    # VCP. Both are plausible for the RS232 log, so offer both, USB first.
+    # VCP. Both are plausible for the RS232 adapter, so offer both, USB first.
     hits = sorted(glob.glob("/dev/ttyUSB*")) + sorted(glob.glob("/dev/ttyACM*"))
     if not hits:
         NOTES.append("no /dev/ttyUSB* or /dev/ttyACM* right now -- plug the RS232 "
-                     "adapter in and re-run, or --set LOG_PORTS=/dev/ttyUSB0")
+                     "adapter in and re-run, or --set RS232_PORT=/dev/ttyUSB0")
     return hits or None
+
+
+def detect_rs232_port():
+    """The most plausible of detect_rs232_ports(); the others go into NOTES."""
+    found = detect_rs232_ports()
+    if not found:
+        return None
+    if len(found) > 1:
+        NOTES.append("RS232_PORT is a guess among %s; fix it with --set RS232_PORT=<port>"
+                     % ", ".join(found))
+    return found[0]
 
 
 def detect_workspace():
@@ -345,8 +333,19 @@ def detect_workspace():
     return str(Path(boot).parent) if boot else None
 
 
+def detect_board_uid():
+    """The UID of the one board answering discovery; None if zero or several."""
+    found = discover_boards(3.0)
+    if len(found) == 1:
+        return next(iter(found))
+    if found:
+        NOTES.append("BOARD_UID: several boards answered (%s); pick one with --set BOARD_UID=<uid>"
+                     % ", ".join("%s at %s" % (u, ip) for u, (ip, _r) in sorted(found.items())))
+    return None
+
+
 # ---------------------------------------------------------------- the table
-# kind: "path" must exist on disk; "ports" is a list; "plain" is written as-is.
+# kind: "path" must exist on disk; "port" is a serial port name; "plain" is written as-is.
 SETTINGS = [
     ("__section__", "repositories",
      ["The three repos this product is built from.",
@@ -363,6 +362,9 @@ SETTINGS = [
     ("PORTTOOL_REPO", "path", detect_repo("OpenPLC_PortsTestingTool"), False,
      ["PortTool. Optional: only the three-way calibration-area contract in P2",
       "reads it (PortTool writes the area)."]),
+    ("ETSPROD_REPO", "path", detect_repo("OpenPLC_ETS_Prod"), False,
+     ["ETS product repo. Optional: only P2 mirror 17 reads it (knx_objects.json",
+      "and tools/gen_product.py, which generates the core's KNX object header)."]),
     ("HW_REPO", "path", detect_repo("Hardware"), False,
      ["schematics and production files. Optional -- but when a document and the",
       "schematic disagree, the schematic wins, so pin work needs it present."]),
@@ -397,9 +399,6 @@ SETTINGS = [
       "This is the install root; the versioned plugin underneath it is resolved",
       "at run time, because hardcoding it breaks on every CubeIDE update."]),
     ("CUBEIDE", "path", detect_cubeide, False, []),
-    ("GIT_BASH", "path", detect_git_bash, False,
-     ["compile_tool.sh needs a real bash. On Windows the bash on PATH is the",
-      "WSL launcher, not a shell, so build.py asks for this one by name."]),
     ("WORKSPACE", "path", detect_workspace, False,
      ["Eclipse workspace holding the bootloader project"]),
     ("IAPTOOL", "plain", lambda: "", False,
@@ -431,19 +430,26 @@ SETTINGS = [
     ("RENODE", "path", detect_renode, False, []),
 
     ("__section__", "board",
-     ["LOG_PORTS: where the bootloader/app printf lands. UART4 reaches RS232",
-      "terminals C05/C06 -- real +/-12V levels, so this is an RS232 adapter, not",
-      "a TTL one. Most likely port first; tools/ try them in order.",
+     ["RS232_PORT: the RS232 adapter on terminals C05/C06 -- real +/-12V levels,",
+      "not TTL. Only the cases that test the RS232 terminal and the on-board",
+      "sketches that print with RS232 use it; the board's own log is on its USB",
+      "port 1, found by BOARD_UID.",
       "",
-      "These are the values init_machine can least justify guessing: it lists the",
-      "ports that exist, not the one the board is on. Fix the order by hand or",
-      "with --set once you know."]),
-    ("LOG_PORTS", "ports", detect_log_ports, False, []),
-    ("LOG_BAUD", "plain", lambda: 115200, False, []),
+      "This is the value init_machine can least justify guessing: it sees the",
+      "ports that exist, not the one the adapter is on. Fix it with --set once",
+      "you know."]),
+    ("RS232_PORT", "port", detect_rs232_port, False, []),
+    ("RS232_BAUD", "plain", lambda: 115200, False, []),
     ("CDC_PORT", "plain", lambda: "", False,
      ["the board's USB CDC, when enumerated"]),
-    ("BOARD_IP", "plain", lambda: "192.168.0.7", False,
-     ["not a property of this machine, but of the board on your desk"]),
+    ("RS485_PORT", "plain", lambda: "", False,
+     ["the USB-RS485 adapter wired to A10/A11"]),
+    ("BOARD_UID", "plain", detect_board_uid, False,
+     ["the UID of the board on your desk; on-board scripts find its IP by",
+      "broadcasting openplc_discover, because DHCP moves the address"]),
+    ("BOARD_IP", "plain", lambda: "", False,
+     ["optional override: when set, scripts use it and skip discovery --",
+      "only for a network where broadcast does not reach the board"]),
 ]
 
 RESOLVED = {}
@@ -462,6 +468,7 @@ EXAMPLES = {
         "TEST_REPO": r"E:\WorkSpace\Schaeffer-AG\OpenPLC_Test",
         "IAPTOOL_REPO": r"E:\WorkSpace\Schaeffer-AG\IAPTranfer_Tool",
         "PORTTOOL_REPO": r"E:\WorkSpace\Schaeffer-AG\OpenPLC_PortsTestingTool",
+        "ETSPROD_REPO": r"E:\WorkSpace\Schaeffer-AG\OpenPLC_ETS_Prod",
         "HW_REPO": r"E:\WorkSpace\Schaeffer-AG\Hardware",
         "REF_REPO": r"E:\WorkSpace\Schaeffer-AG\ref\Hello_World_OpenPLC",
         # One level OUT from the product workspace, not inside it -- AI-Skills is
@@ -478,7 +485,7 @@ EXAMPLES = {
         "HOST_CC": r"D:\Soft\mingw64\bin\gcc.exe",
         "RENODE": r"D:\Soft\renode\renode.exe",
         "WORKSPACE": r"E:\WorkSpace\Schaeffer-AG",
-        "LOG_PORTS": "COM5,COM4",
+        "RS232_PORT": "COM5",
         "CDC_PORT": "COM6",
     },
     "posix": {
@@ -487,6 +494,7 @@ EXAMPLES = {
         "TEST_REPO": "/home/you/Documents/WorkSpace/OpenPLC_Test",
         "IAPTOOL_REPO": "/home/you/Documents/WorkSpace/IAPTranfer_Tool",
         "PORTTOOL_REPO": "/home/you/Documents/WorkSpace/OpenPLC_PortsTestingTool",
+        "ETSPROD_REPO": "/home/you/Documents/WorkSpace/OpenPLC_ETS_Prod",
         "HW_REPO": "/home/you/Documents/WorkSpace/Hardware",
         "REF_REPO": "/home/you/Documents/WorkSpace/ref/Hello_World_OpenPLC",
         "DOCS_REPO": "/home/you/Documents/Schaeffer-AG/OpenPLC_Docs",
@@ -500,7 +508,7 @@ EXAMPLES = {
         "HOST_CC": "/usr/bin/gcc",
         "RENODE": "/usr/bin/renode",
         "WORKSPACE": "/home/you/Documents/WorkSpace",
-        "LOG_PORTS": "/dev/ttyUSB0,/dev/ttyACM0",
+        "RS232_PORT": "/dev/ttyUSB0",
         "CDC_PORT": "/dev/ttyACM1",
     },
     # Only what macOS spells differently from Linux; the rest falls through to
@@ -512,19 +520,20 @@ EXAMPLES = {
         "TEST_REPO": "/Users/you/WorkSpace/OpenPLC_Test",
         "IAPTOOL_REPO": "/Users/you/WorkSpace/IAPTranfer_Tool",
         "PORTTOOL_REPO": "/Users/you/WorkSpace/OpenPLC_PortsTestingTool",
+        "ETSPROD_REPO": "/Users/you/WorkSpace/OpenPLC_ETS_Prod",
         "HW_REPO": "/Users/you/WorkSpace/Hardware",
         "REF_REPO": "/Users/you/WorkSpace/ref/Hello_World_OpenPLC",
         "DOCS_REPO": "/Users/you/Schaeffer-AG/OpenPLC_Docs",
         "SKILLS_REPO": "/Users/you/AI-Skills",
         "A15": "/Users/you/Library/Arduino15",
         "CORE_LIVE": "/Users/you/Library/Arduino15/packages/OpenPLC_Alpha/hardware/stm32/0.1.3-pre",
-        "CUBEIDE": "/Applications/STM32CubeIDE_1.10.0",
+        "CUBEIDE": "/Applications/STM32CubeIDE.app",
         "IDE": "/Applications/Arduino IDE.app/Contents",
         "ARDUINO_CLI": "/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli",
         "ARDUINO_CLI_CONFIG": "/Users/you/.arduinoIDE/arduino-cli.yaml",
         "HOST_CC": "/usr/bin/clang",
         "WORKSPACE": "/Users/you/WorkSpace",
-        "LOG_PORTS": "/dev/cu.usbserial-1410,/dev/cu.usbmodem1103",
+        "RS232_PORT": "/dev/cu.usbserial-1410",
         "CDC_PORT": "/dev/cu.usbmodem1103",
     },
 }
@@ -544,6 +553,7 @@ WHAT_IT_IS = {
     "TEST_REPO": "this repo, OpenPLC_Test",
     "IAPTOOL_REPO": "the IAPTranfer_Tool clone: IAPTool, the uploader under test",
     "PORTTOOL_REPO": "the OpenPLC_PortsTestingTool clone (calibration-area contract only)",
+    "ETSPROD_REPO": "the OpenPLC_ETS_Prod clone (KNX object map, P2 mirror 17 only)",
     "HW_REPO": "the Hardware clone -- schematics and production files. Forgejo only, "
                "there is no GitHub copy of it",
     "REF_REPO": "the Hello_World_OpenPLC clone -- CubeIDE reference project for this board",
@@ -555,18 +565,20 @@ WHAT_IT_IS = {
                    "product repos",
     "A15": "Arduino's data directory, the one holding packages/",
     "CORE_LIVE": "the installed OpenPLC_Alpha board package the IDE compiles against",
-    "CUBEIDE": "the STM32CubeIDE install ROOT -- the directory that contains STM32CubeIDE/plugins",
+    "CUBEIDE": "the STM32CubeIDE install ROOT -- the directory that contains its plugins dir "
+               "(STM32CubeIDE/plugins on Windows, plugins on Linux, Contents/Eclipse/plugins in the macOS .app)",
     "WORKSPACE": "the Eclipse workspace holding the bootloader project",
     "IDE": "the Arduino IDE 2.x install ROOT -- the directory containing resources/app",
-    "ARDUINO_CLI": "the arduino-cli that ships inside the IDE (not a standalone release)",
+    "ARDUINO_CLI": "the arduino-cli that ships inside the IDE; an arduino-cli on PATH is the fallback",
     "ARDUINO_CLI_CONFIG": "arduino-cli.yaml, which points the CLI at Arduino15 and user libraries",
     "HOST_CC": "a modern gcc or clang for the host-side C tests (GCC 5 or newer)",
     "RENODE": "renode.exe of a Renode install (the portable Windows build works)",
-    "GIT_BASH": "a real bash for compile_tool.sh -- on Windows Git's bash.exe, not WSL's launcher",
-    "LOG_PORTS": "serial port(s) carrying the bootloader/app printf, most likely first",
-    "LOG_BAUD": "baud rate of the log port -- a property of the firmware, not of this machine",
+    "RS232_PORT": "the serial port of the RS232 adapter wired to terminals C05/C06",
+    "RS232_BAUD": "baud rate on the RS232 terminals -- set by the sketches, not by this machine",
     "CDC_PORT": "the board's USB CDC port, when it is enumerated",
-    "BOARD_IP": "the board's IP address",
+    "RS485_PORT": "the USB-RS485 adapter wired to A10/A11",
+    "BOARD_UID": "the board's UID, the second field of its openplc_discover reply",
+    "BOARD_IP": "the board's IP address -- an override; normally empty",
     "IAPTOOL": "a specific IAPTool build; normally left empty so it is found by wildcard",
 }
 
@@ -584,7 +596,7 @@ def searched_in(key):
     if key == "HOST_CC":
         return ["gcc or clang on PATH"] + (
             [r"C:\mingw64\bin", r"C:\msys64\mingw64\bin", r"D:\Soft\mingw64\bin"] if IS_WIN else [])
-    if key == "LOG_PORTS":
+    if key == "RS232_PORT":
         if IS_WIN:
             return [r"HKLM\HARDWARE\DEVICEMAP\SERIALCOMM"]
         if PLATFORM == "macos":
@@ -598,11 +610,12 @@ def validate(key, value):
     for the two settings whose right answer is an install root."""
     p = Path(value)
     if key == "CUBEIDE":
-        if not (p / "STM32CubeIDE" / "plugins").is_dir():
-            return False, "no STM32CubeIDE/plugins under it -- this is probably one level too high or too low"
+        plugins = cube_layout(p)[0]
+        if not plugins.is_dir():
+            return False, "no %s -- this is probably one level too high or too low" % plugins
     if key == "IDE":
-        if not (p / "resources/app/lib/backend/resources" / ("arduino-cli" + EXE)).exists():
-            return False, "no bundled arduino-cli under it -- expected resources/app/lib/backend/resources/"
+        if not (p / IDE_CLI_REL).exists():
+            return False, "no bundled arduino-cli under it -- expected %s" % IDE_CLI_REL
     if key == "A15":
         if not (p / "packages").is_dir():
             return False, "no packages/ under it -- that directory is what makes this Arduino's data dir"
@@ -627,8 +640,6 @@ def describe(key, kind, indent="    "):
     ex = example_for(key)
     if ex:
         print("%sexample    : %s" % (indent, ex))
-    if kind == "ports":
-        print("%sformat     : comma-separated, most likely first" % indent)
 
 
 def ask_for(key, kind, required):
@@ -642,7 +653,7 @@ def ask_for(key, kind, required):
     Warn("  %s was not found." % key)
     describe(key, kind)
 
-    hint = "path" if kind != "ports" else "port(s)"
+    hint = "path" if kind != "port" else "port"
     for _ in range(5):
         try:
             raw = input("    paste the %s (Enter to skip): " % hint).strip()
@@ -665,9 +676,7 @@ def ask_for(key, kind, required):
         raw = raw.strip().strip('"').strip("'")
         raw = os.path.expanduser(os.path.expandvars(raw))
 
-        if kind == "ports":
-            return [p.strip() for p in raw.split(",") if p.strip()]
-        if kind == "plain":
+        if kind in ("port", "plain"):
             return raw
         if not Path(raw).exists():
             Fail("    that path does not exist: %s" % raw)
@@ -696,7 +705,11 @@ def load_existing():
         Warn("  the existing config/machine.py could not be imported (%s);" % e)
         Warn("  treating every value as unset")
         return {}
-    return {k: getattr(mod, k) for k in dir(mod) if k.isupper()}
+    found = {k: getattr(mod, k) for k in dir(mod) if k.isupper()}
+    # Renamed 2026-10-17 (the board log moved to USB): keep a hand-fixed RS232 port.
+    if "RS232_PORT" not in found and found.get("LOG_PORTS"):
+        found["RS232_PORT"] = found["LOG_PORTS"][0]
+    return found
 
 
 def looks_wrong_platform(value):
@@ -711,11 +724,9 @@ def keepable(key, kind, value):
     """A previous value is kept only if it could still be true here."""
     if value is None or value == "":
         return False
-    if kind == "ports":
-        if not isinstance(value, (list, tuple)) or not value:
-            return False
-        return not any(looks_wrong_platform(p) or (not IS_WIN and re.match(r'^COM\d+$', str(p), re.I))
-                       for p in value)
+    if kind == "port":
+        return isinstance(value, str) and not (
+            looks_wrong_platform(value) or (not IS_WIN and re.match(r'^COM\d+$', value, re.I)))
     if kind == "plain":
         return not looks_wrong_platform(value)
     if looks_wrong_platform(value):
@@ -771,7 +782,7 @@ def render(comment_prefix, assign, literal, values):
             out.append((comment_prefix + " " + c).rstrip())
         v = values.get(key)
         if v is None:
-            v = [] if kind == "ports" else ""
+            v = ""
         out.append("%s = %s" % (assign(key), literal(v)))
     return "\n".join(out) + "\n"
 
@@ -1017,9 +1028,7 @@ def main():
     for key, kind, detect, required, _ in entries:
         if key in forced:
             value, source = forced[key], "given"
-            if kind == "ports":
-                value = [p.strip() for p in value.split(",") if p.strip()]
-            elif kind == "plain" and str(value).isdigit():
+            if kind == "plain" and str(value).isdigit() and key != "BOARD_UID":  # a UID is all digits but not a number
                 value = int(value)
             # A --set value is taken as given -- the caller may be pointing at
             # something not installed yet -- but a typo must not pass in
@@ -1045,7 +1054,7 @@ def main():
     # so supplying A15 by hand should not also mean supplying CORE_LIVE.
     if interactive:
         pending = [(k, ki, d, r) for k, ki, d, r, _ in entries
-                   if is_empty(RESOLVED[k]) and k not in ("IAPTOOL", "CDC_PORT")]
+                   if is_empty(RESOLVED[k]) and k not in ("IAPTOOL", "CDC_PORT", "BOARD_IP")]
         if pending:
             Section("not found automatically -- paste them in")
             print("  Enter alone skips one. Skipping only limits what can run;")
@@ -1067,14 +1076,14 @@ def main():
     for key, kind, _detect, required, _ in entries:
         value, source = RESOLVED[key], SOURCE[key]
         if is_empty(value):
-            # IAPTOOL and CDC_PORT are meant to be empty; anything else that
+            # IAPTOOL, CDC_PORT and BOARD_IP are meant to be empty; anything else that
             # came up empty is a thing this machine does not have.
             if required:
                 Warn("  %-19s %-9s MISSING" % (key, ""))
                 missing_required.append(key)
             else:
                 print("  %-19s %-9s %s" % (key, "", "(empty)"))
-                if key not in ("IAPTOOL", "CDC_PORT"):
+                if key not in ("IAPTOOL", "CDC_PORT", "BOARD_IP"):
                     missing_optional.append(key)
             continue
         shown = ", ".join(str(v) for v in value) if isinstance(value, list) else str(value)

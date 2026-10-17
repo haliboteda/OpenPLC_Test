@@ -8,7 +8,7 @@ Four groups, in the order the file is used:
                   common editing mistake is adding a row and forgetting one of
                   its columns. Cheap to check, and the failure is otherwise a
                   KeyError on a machine you are not sitting at.
-  ports        -- the macOS branch of detect_log_ports, which no machine here
+  ports        -- the macOS branch of detect_rs232_ports, which no machine here
                   can exercise for real.
   claude dirs  -- the merge into .claude/settings.local.json. This one edits a
                   file holding hundreds of hand-approved permission rules, so
@@ -92,14 +92,14 @@ def test_macos_ports():
     nothing there and the report reads "no adapter plugged in" on a machine
     where one is. No machine in this project can test that for real yet, so the
     filesystem is faked and only the ordering logic is under test."""
-    print("=== detect_log_ports on macOS ===")
+    print("=== detect_rs232_ports on macOS ===")
     fake = {
         "/dev/cu.usbserial*": ["/dev/cu.usbserial-1410"],
         "/dev/cu.usbmodem*": ["/dev/cu.usbmodem1103"],
         "/dev/cu.*": ["/dev/cu.Bluetooth-Incoming-Port", "/dev/cu.debug-console",
                       "/dev/cu.usbmodem1103", "/dev/cu.usbserial-1410"],
     }
-    # IS_WIN as well as PLATFORM: detect_log_ports tests IS_WIN first, so
+    # IS_WIN as well as PLATFORM: detect_rs232_ports tests IS_WIN first, so
     # setting only PLATFORM leaves the Windows registry branch in charge and the
     # test silently checks nothing.
     real_platform, real_win, real_glob = im.PLATFORM, im.IS_WIN, im.glob.glob
@@ -107,12 +107,12 @@ def test_macos_ports():
     im.glob.glob = lambda p: list(fake.get(p, []))
     try:
         check("USB adapters first, Bluetooth and debug-console dropped, no repeats",
-              im.detect_log_ports(),
+              im.detect_rs232_ports(),
               ["/dev/cu.usbserial-1410", "/dev/cu.usbmodem1103"])
         im.glob.glob = lambda p: []
         before = len(im.NOTES)
         check("nothing plugged in is None, not an empty list",
-              im.detect_log_ports(), None)
+              im.detect_rs232_ports(), None)
         check("and it says so rather than staying quiet",
               len(im.NOTES) > before, True)
     finally:
@@ -264,9 +264,8 @@ def test_ask_for():
         [cube_parent, cube], "CUBEIDE", "path", False, cube)
     run("a path that does not exist is re-asked",
         [os.path.join(cube, "definitely-not-here"), ide], "IDE", "path", False, ide)
-    run("ports are split on commas",
-        ["/dev/ttyUSB0, /dev/ttyACM0"], "LOG_PORTS", "ports", False,
-        ["/dev/ttyUSB0", "/dev/ttyACM0"])
+    run("a port is taken as typed, quotes stripped",
+        ['"/dev/ttyUSB0"'], "RS232_PORT", "port", False, "/dev/ttyUSB0")
     run("a required setting asks twice before giving up",
         ["", ""], "BOOT_REPO", "path", True, None)
     run("EOF is a skip, not a crash", [], "CUBEIDE", "path", False, None)

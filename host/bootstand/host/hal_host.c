@@ -11,15 +11,12 @@
 
 #include <stdlib.h>
 
-#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
-#endif
 
 CRC_HandleTypeDef hcrc;
 RNG_HandleTypeDef hrng;
 RTC_HandleTypeDef hrtc;
-UART_HandleTypeDef huart4;
 static GPIO_TypeDef s_boot0_port;
 GPIO_TypeDef *BOOT0_GPIO_Port = &s_boot0_port;
 
@@ -69,7 +66,6 @@ uint32_t HAL_CRC_Calculate(CRC_HandleTypeDef *h, uint32_t *buf, uint32_t len)
 
 int HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin) { (void)port; (void)pin; return GPIO_PIN_RESET; }
 void HAL_MPU_Disable(void) { }
-HAL_StatusTypeDef HAL_UART_DeInit(UART_HandleTypeDef *h) { (void)h; return HAL_OK; }
 HAL_StatusTypeDef HAL_RCC_DeInit(void) { return HAL_OK; }
 HAL_StatusTypeDef HAL_DeInit(void) { return HAL_OK; }
 uint32_t HAL_GetUIDw0(void) { return host_args.uid[0]; }
@@ -82,18 +78,9 @@ HAL_StatusTypeDef HAL_PWREx_EnableBkUpReg(void) { return HAL_OK; }
 HAL_StatusTypeDef HAL_RNG_GenerateRandomNumber(RNG_HandleTypeDef *h, uint32_t *out)
 {
 	(void)h;
-#ifdef _WIN32
 	if (BCryptGenRandom(NULL, (PUCHAR)out, sizeof(*out), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
 		return HAL_ERROR;
 	}
-#else
-	FILE *f = fopen("/dev/urandom", "rb");
-	if ((f == NULL) || (fread(out, sizeof(*out), 1, f) != 1)) {
-		if (f != NULL) fclose(f);
-		return HAL_ERROR;
-	}
-	fclose(f);
-#endif
 	return HAL_OK;
 }
 
@@ -153,4 +140,6 @@ void SCB_EnableICache(void) { }
 void SCB_CleanDCache_by_Addr(uint32_t *addr, int32_t size) { (void)addr; (void)size; }
 void SCB_InvalidateDCache_by_Addr(uint32_t *addr, int32_t size) { (void)addr; (void)size; }
 void __disable_irq(void) { }
+uint32_t __get_PRIMASK(void) { return 0U; }
+void __set_PRIMASK(uint32_t primask) { (void)primask; }
 

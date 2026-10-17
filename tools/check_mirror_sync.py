@@ -561,7 +561,7 @@ def get_calib_layout_c(path):
 
 
 def get_calib_layout_go(path):
-    """The same anchor from PortTool's internal/calarea/calarea.go, which writes it."""
+    """The same anchor from PortTool's src/calarea/calarea.go, which writes it."""
     if not Path(path).is_file():
         return None
     # Normalised to LF: the patterns below anchor on "\n".
@@ -579,7 +579,7 @@ def get_calib_layout_go(path):
         return None
     parts.append("SIZE=%s" % m.group(1))
     parts.append("fields=" + ",".join(re.findall(r'^\s*(\w+)\s', st.group(1), re.M)))
-    parts.append("channels=" + ",".join(["AI1"] + re.findall(r'^\s*(\w+)\s', ch.group(1), re.M)))
+    parts.append("channels=" + ",".join(["AI1"] + re.findall(r'^\s*(\w+)\b', ch.group(1), re.M)))
     return ";".join(parts)
 
 
@@ -588,7 +588,7 @@ def get_calib_layout_go(path):
 compare_anchor("calibration area layout", {
     "bootloader IAPServer/calib_area.h": get_calib_layout_c(BOOT / "IAPServer/calib_area.h"),
     "core OpenPLC_Ports/src/openplc_calib.h": get_calib_layout_c(LIVE / "libraries/OpenPLC_Ports/src/openplc_calib.h"),
-    "porttool internal/calarea/calarea.go": get_calib_layout_go(PORTTOOL / "internal/calarea/calarea.go"),
+    "porttool src/calarea/calarea.go": get_calib_layout_go(PORTTOOL / "src/calarea/calarea.go"),
 })
 
 # --- AI conversion constants (mirror 14) --------------------------------------
@@ -600,30 +600,337 @@ def get_ai_consts_c(path):
     t = read_text(path)
     div = re.search(r"pin_mv\(raw\)\s*\*\s*\(([\d.]+)f\s*/\s*([\d.]+)f\)", t)
     shunt = re.search(r"pin_mv\(raw\)\s*/\s*([\d.]+)f", t)
-    fs = re.search(r"raw\s*\*\s*([\d.]+)f\s*/\s*\(float\)OPENPLC_ADC_FULL", t)
-    if not (div and shunt and fs):
+    fs = re.search(r"raw\s*\*\s*([\d.]+)f\s*/\s*\(float\)OPENPLC_AI_FULL", t)
+    hdr = Path(path).with_name("openplc_analog.h")
+    full = re.search(r"#define\s+OPENPLC_AI_FULL\s+(\d+)U", read_text(hdr)) if hdr.exists() else None
+    if not (div and shunt and fs and full):
         return None
-    return "div=%g/%g;shunt=%g;fs=%g" % (float(div.group(1)), float(div.group(2)),
-                                          float(shunt.group(1)), float(fs.group(1)))
+    return "div=%g/%g;shunt=%g;fs=%g/%s" % (float(div.group(1)), float(div.group(2)),
+                                             float(shunt.group(1)), float(fs.group(1)), full.group(1))
 
 
-def get_ai_consts_js(path):
+def get_ai_consts_go(path):
+    """PortTool's calstore/spec.go: named constants used by Range.AINominal (decision 136)."""
     if not Path(path).exists():
         return None
     t = read_text(path)
-    div = re.search(r"aicalPinMv\(raw\)\s*\*\s*([\d.]+)\s*/\s*([\d.]+)", t)
-    shunt = re.search(r"aicalPinMv\(raw\)\s*/\s*([\d.]+)", t)
-    fs = re.search(r"function aicalPinMv\(raw\)\s*\{\s*return raw\s*\*\s*([\d.]+)\s*/", t)
-    if not (div and shunt and fs):
+    v = {k: re.search(r"\b%s\s*=\s*([\d.]+)" % k, t) for k in ("VrefMV", "ADCMax", "divTop", "divLow", "shuntR")}
+    formula = (re.search(r"pin\s*:=\s*raw\s*\*\s*VrefMV\s*/\s*ADCMax", t)
+               and re.search(r"return pin\s*\*\s*\(divTop\s*\+\s*divLow\)\s*/\s*divLow", t)
+               and re.search(r"return pin\s*/\s*shuntR", t))
+    if not formula or not all(v.values()):
         return None
-    return "div=%g/%g;shunt=%g;fs=%g" % (float(div.group(1)), float(div.group(2)),
-                                          float(shunt.group(1)), float(fs.group(1)))
+    f = {k: float(m.group(1)) for k, m in v.items()}
+    return "div=%g/%g;shunt=%g;fs=%g/%d" % (f["divTop"] + f["divLow"], f["divLow"],
+                                             f["shuntR"], f["VrefMV"], int(f["ADCMax"]))
 
 
 compare_anchor("AI conversion constants", {
     "core OpenPLC_Ports/src/openplc_analog.c": get_ai_consts_c(LIVE / "libraries/OpenPLC_Ports/src/openplc_analog.c"),
-    "porttool ptpanel/web/index.html": get_ai_consts_js(PORTTOOL / "internal/ptpanel/web/index.html"),
+    "porttool src/calstore/spec.go": get_ai_consts_go(PORTTOOL / "src/calstore/spec.go"),
 })
+
+# --- CAN bit timing ---------------------------------------------------------
+# The fixture's firmware and the app must agree on what "500 kbit/s" means, or a
+# board that passed the fixture's CAN step talks at a different rate in the field.
+CAN_ROW = r"\{\s*(\d+)u,\s*(\d+)u,\s*(\d+)u,\s*(\d+)u,\s*(\d+)u\s*\}"
+
+
+def get_can_timing(path):
+    if not Path(path).exists():
+        return None
+    t = read_text(path)
+    rows = ["/".join(m.groups()) for m in re.finditer(CAN_ROW, t)]
+    clock = re.search(r"FdcanClockSelection\s*=\s*(\w+)", t)
+    if not rows or not clock:
+        return None
+    return "%s;%s" % (clock.group(1), ",".join(rows))
+
+
+Section("CAN bit timing")
+compare_anchor("CAN timing table and kernel clock", {
+    "bootloader TestCase/common/port_can.c": get_can_timing(BOOT / "TestCase/common/port_can.c"),
+    "core OpenPLC_Ports/src/OpenPLC_CAN.cpp": get_can_timing(LIVE / "libraries/OpenPLC_Ports/src/OpenPLC_CAN.cpp"),
+})
+
+# --- ADC configuration (decision 124) ----------------------------------------
+# The calibration the fixture fits is only valid for readings taken the same
+# way: same ADC clock, sampling window and resolution on both sides.
+def first(path, pattern):
+    if not Path(path).exists():
+        return None
+    m = re.search(pattern, read_text(path))
+    return m.group(1) if m else None
+
+
+def same_all(path, pattern):
+    """One value when every match agrees, else all of them, so a split shows."""
+    if not Path(path).exists():
+        return None
+    vals = sorted(set(re.findall(pattern, read_text(path))))
+    return ",".join(vals) if vals else None
+
+
+def adc_config(clk, div, sample, res):
+    if None in (clk, div, sample, res):
+        return None
+    return "clk=%s;div=%s;sample=%s;res=%s" % (clk, div, sample, res)
+
+
+port_adc = BOOT / "TestCase/common/port_adc.c"
+Section("ADC configuration")
+compare_anchor("ADC clock, sampling time and resolution", {
+    "bootloader TestCase/common/port_adc.c": adc_config(
+        first(port_adc, r"AdcClockSelection\s*=\s*RCC_ADCCLKSOURCE_(\w+)"),
+        first(port_adc, r"ClockPrescaler\s*=\s*ADC_CLOCK_(\w+)"),
+        first(port_adc, r"SamplingTime\s*=\s*ADC_SAMPLETIME_(\w+)"),
+        first(port_adc, r"#define\s+ADC_RESOLUTION_BITS\s+ADC_RESOLUTION_(\d+)B")),
+    "core boards.txt + generic_clock.c + OpenPLC_Ports.cpp": adc_config(
+        first(LIVE / "variants/STM32H7xx/H743/generic_clock.c", r"AdcClockSelection\s*=\s*RCC_ADCCLKSOURCE_(\w+)"),
+        same_all(LIVE / "boards.txt", r"-DADC_CLOCK_DIV=ADC_CLOCK_(\w+)"),
+        same_all(LIVE / "boards.txt", r"-DADC_SAMPLINGTIME=ADC_SAMPLETIME_(\w+)"),
+        same_all(LIVE / "libraries/OpenPLC_Ports/src/OpenPLC_Ports.cpp", r"analogReadResolution\((\d+)\)")),
+})
+
+# --- fixture command line limit (mirror 18) ----------------------------------
+
+compare_anchor("fixture command line limit", {
+    "bootloader TestCase/porttool/porttool.h": first(BOOT / "TestCase/porttool/porttool.h", r"#define\s+PORTTOOL_LINE_MAX\s+(\d+)U?"),
+    "porttool src/ptproto/cal.go": first(PORTTOOL / "src/ptproto/cal.go", r"const\s+CommandLineMax\s*=\s*(\d+)"),
+})
+
+# --- boot log buffer in SRAM4 (mirror 19) ------------------------------------
+# Both images write the same ring; a drift reads the other side's lines as
+# corrupt and wipes them. Format: $PROD/docs/modules/M1/BOOT-LOG.md.
+def get_c_body(path):
+    """Whole C file without comments, #include lines and whitespace runs."""
+    if not Path(path).exists():
+        return None
+    text = read_text(path).replace("\r\n", "\n")
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", "", text)
+    text = re.sub(r"(?m)^\s*#\s*include\b[^\n]*$", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def get_boot_log_consts(path):
+    if not Path(path).exists():
+        return None
+    text = read_text(path)
+    parts = []
+    for k in ("ADDR", "SIZE", "HDR_SIZE", "MAGIC", "VERSION", "SYNC", "LINE_MAX", "CRC8_POLY",
+              "TAG_BL", "TAG_BOOT", "TAG_NET", "TAG_FAULT", "TAG_LOG"):
+        m = re.search(r'#define\s+BOOT_LOG_%s\s+(0x[0-9A-Fa-f]+|\d+|"[^"]*")' % k, text)
+        if not m:
+            return None
+        parts.append("%s=%s" % (k, m.group(1)))
+    st = re.search(r'typedef struct \{(.*?)\} boot_log_hdr_t;', text, re.S)
+    if not st:
+        return None
+    for m in re.finditer(r'(uint\d+_t)\s+(\w+)\s*;', st.group(1)):
+        parts.append("%s %s" % (m.group(1), m.group(2)))
+    return ";".join(parts)
+
+
+def get_ram_d3(path, what):
+    """'origin' as an int string, or 'length' with whitespace removed."""
+    m = get_anchor(path, r'RAM_D3\s*\(xrw\)\s*:\s*ORIGIN\s*=\s*(0x[0-9A-Fa-f]+\s*,\s*LENGTH\s*=\s*[^\n]+)')
+    if m is None:
+        return None
+    origin, length = [s.strip() for s in m.split(",", 1)]
+    if what == "origin":
+        return str(int(origin, 16))
+    return re.sub(r"\s+", "", length.split("=", 1)[1])
+
+
+def boot_log_end(path):
+    """Where RAM_D3 has to start: BOOT_LOG_ADDR + BOOT_LOG_SIZE."""
+    c = get_boot_log_consts(path)
+    if c is None:
+        return None
+    v = dict(p.split("=", 1) for p in c.split(";") if "=" in p)
+    return str(int(v["ADDR"], 0) + int(v["SIZE"], 0))
+
+
+Section("boot log buffer (mirror 19)")
+_boot_blog = BOOT / "IAPServer"
+_core_blog = LIVE / "cores/arduino/stm32"
+compare_anchor("boot_log.c body (comments and includes stripped)", {
+    "bootloader IAPServer/boot_log.c": get_c_body(_boot_blog / "boot_log.c"),
+    "core cores/arduino/stm32/boot_log.c": get_c_body(_core_blog / "boot_log.c"),
+})
+compare_anchor("boot_log.h constants, tags and header layout", {
+    "bootloader IAPServer/boot_log.h": get_boot_log_consts(_boot_blog / "boot_log.h"),
+    "core cores/arduino/stm32/boot_log.h": get_boot_log_consts(_core_blog / "boot_log.h"),
+})
+_ld = {
+    "bootloader STM32H743IIKX_FLASH.ld": BOOT / "STM32H743IIKX_FLASH.ld",
+    "bootloader STM32H743IIKX_FLASH_PORTTOOL.ld": BOOT / "STM32H743IIKX_FLASH_PORTTOOL.ld",
+    "core variants/STM32H7xx/H743/ldscript.ld": LIVE / "variants/STM32H7xx/H743/ldscript.ld",
+}
+_origins = {k: get_ram_d3(p, "origin") for k, p in _ld.items()}
+_origins["bootloader IAPServer/boot_log.h (ADDR + SIZE)"] = boot_log_end(_boot_blog / "boot_log.h")
+compare_anchor("RAM_D3 origin starts after the boot log", _origins)
+compare_anchor("RAM_D3 length", {k: get_ram_d3(p, "length") for k, p in _ld.items()})
+
+# --- openplc_log over UDP (mirror 20) ----------------------------------------
+# Both images answer it the same way (decision 148); a drift makes IAPTool read
+# one of them wrong. Format: $PROD/docs/modules/M1/IAP-PROTOCOL.md "openplc_log".
+Section("openplc_log handler (mirror 20)")
+for _fn in ("log_read_reply_allowed", "log_read_line", "log_read_reply"):
+    compare_anchor("udp_server.c %s()" % _fn, {
+        "bootloader IAPServer/udp_server.c": get_function_body(boot_udp, _fn),
+        "core OpenPLC_IAP/src/udp_server.c": get_function_body(core_udp, _fn),
+    })
+for _k in ("REPLY_MAX", "HEADER_MAX", "MAX_REPLIES_PER_SEC"):
+    compare_anchor("LOG_READ_%s" % _k, {
+        "bootloader IAPServer/udp_server.c":
+            get_anchor(boot_udp, r'#define\s+LOG_READ_%s\s+(\d+U?)' % _k),
+        "core OpenPLC_IAP/src/udp_server.c":
+            get_anchor(core_udp, r'#define\s+LOG_READ_%s\s+(\d+U?)' % _k),
+    })
+_LOG_CTX = r'typedef struct \{([^{}]*)\} log_read_ctx_t;'
+_LOG_REQ = (r'(strncmp\(recv_buf, "openplc_log", 11\) == 0\)\s*&&\s*'
+            r'\(\(recv_buf\[11\] == .*?\)\)\)\s*\{\s*log_read_reply\([^;]*;)')
+for _name, _pat in (("log_read_ctx_t layout", _LOG_CTX), ("openplc_log request match", _LOG_REQ)):
+    _sides = {}
+    for _label, _path in (("bootloader IAPServer/udp_server.c", boot_udp),
+                          ("core OpenPLC_IAP/src/udp_server.c", core_udp)):
+        _v = get_anchor(_path, r'(?s)' + _pat)
+        _sides[_label] = None if _v is None else re.sub(r"\s+", " ", _v)
+    compare_anchor(_name, _sides)
+
+# --- read-only queries over UDP (mirror 21) ----------------------------------
+# getuid / getpubkey / getowner / getapprevoked answer alike on both images and
+# every channel (decision 148). Format: $PROD/docs/modules/M1/IAP-PROTOCOL.md
+# "只读查询". The query_* accessors differ by design and are not compared.
+Section("read-only queries (mirror 21)")
+boot_udp_h = BOOT / "IAPServer/udp_server.h"
+for _fn in ("iap_query_reply", "query_reply_allowed"):
+    compare_anchor("udp_server.c %s()" % _fn, {
+        "bootloader IAPServer/udp_server.c": get_function_body(boot_udp, _fn),
+        "core OpenPLC_IAP/src/udp_server.c": get_function_body(core_udp, _fn),
+    })
+compare_anchor("QUERY_MAX_REPLIES_PER_SEC", {
+    "bootloader IAPServer/udp_server.c":
+        get_anchor(boot_udp, r'#define\s+QUERY_MAX_REPLIES_PER_SEC\s+(\d+U?)'),
+    "core OpenPLC_IAP/src/udp_server.c":
+        get_anchor(core_udp, r'#define\s+QUERY_MAX_REPLIES_PER_SEC\s+(\d+U?)'),
+})
+compare_anchor("IAP_QUERY_REPLY_MAX", {
+    "bootloader IAPServer/udp_server.h":
+        get_anchor(boot_udp_h, r'#define\s+IAP_QUERY_REPLY_MAX\s+(\d+U?)'),
+    "core OpenPLC_IAP/src/udp_server.c":
+        get_anchor(core_udp, r'#define\s+IAP_QUERY_REPLY_MAX\s+(\d+U?)'),
+})
+_QUERY_REQ = (r'(\}\s*else if \(iap_query_reply\(recv_buf, query_msg, sizeof\(query_msg\)\)\)\s*\{'
+              r'.*?openplc_udp_reply\([^;]*;\s*\}\s*\})')
+_sides = {}
+for _label, _path in (("bootloader IAPServer/udp_server.c", boot_udp),
+                      ("core OpenPLC_IAP/src/udp_server.c", core_udp)):
+    _v = get_anchor(_path, r'(?s)' + _QUERY_REQ)
+    _sides[_label] = None if _v is None else re.sub(r"\s+", " ", _v)
+compare_anchor("UDP dispatch of the queries", _sides)
+
+
+def c_int(path, name):
+    """A #define as an int, for plain constant expressions like (8U * 1024U)."""
+    v = get_anchor(path, r'#define\s+%s\s+([^\n/]+)' % re.escape(name))
+    if v is None:
+        return None
+    expr = re.sub(r'\b(0x[0-9A-Fa-f]+|\d+)[uUlL]*\b', r'\1', v)
+    if not re.fullmatch(r'[0-9A-Fa-fx()+\-* \t]+', expr):
+        return None
+    return eval(expr)  # digits and operators only, checked above
+
+
+_boot_state_c = BOOT / "IAPServer/bootloader_state.c"
+_boot_state_h = BOOT / "IAPServer/bootloader_state.h"
+_boot_calib = BOOT / "IAPServer/calib_area.h"
+_core_meta = LIVE / "libraries/OpenPLC_IAP/src/fw_meta_ro.c"
+_parts = [c_int(boot_owner, "OWNER_SLOT_BASE"), c_int(boot_owner, "OWNER_SLOT_SIZE"),
+          c_int(_boot_calib, "CALIB_AREA_ADDR"), c_int(_boot_state_c, "IAP_SECTOR_SIZE"),
+          c_int(_boot_state_h, "IAP_META_SLOT_SIZE")]
+_boot_base = _boot_end = None
+if None not in _parts:
+    _boot_base = str(_parts[0] + _parts[1])
+    _boot_end = str(_parts[2] + _parts[3] - _parts[4])
+for _name, _boot, _core in (
+        ("metadata area start", _boot_base, "FW_META_BASE"),
+        ("metadata area end (the marker)", _boot_end, "FW_META_END"),
+        ("metadata slot size", c_int(_boot_state_h, "IAP_META_SLOT_SIZE"), "FW_META_SLOT_SIZE"),
+        ("metadata record slots", c_int(_boot_state_h, "IAP_METADATA_SLOTS"), "FW_META_REC_SLOTS"),
+        ("metadata record type", c_int(_boot_state_c, "IAP_REC_METADATA"), "FW_META_REC_TYPE")):
+    _c = c_int(_core_meta, _core)
+    compare_anchor(_name, {
+        "bootloader IAPServer/bootloader_state.{c,h}": None if _boot is None else str(_boot),
+        "core OpenPLC_IAP/src/fw_meta_ro.c": None if _c is None else str(_c),
+    })
+
+# --- KNX object map (mirror 17)----------------------------------------------
+# The core header is generated from the ETS repo's knx_objects.json; recompute it
+# with the generator itself and compare. Spec: M3 R3-21, KEX-15.
+def etsprod_repo():
+    """ETSPROD_REPO, or the BOOT_REPO sibling when machine.py predates it."""
+    configured = getattr(cfg, "ETSPROD_REPO", "")
+    if configured:
+        return Path(configured)
+    return Path(getattr(cfg, "BOOT_REPO", "") or ".").parent / "OpenPLC_ETS_Prod"
+
+
+def load_generator(path):
+    """Import gen_product.py by file path; sys.path is restored afterwards."""
+    import importlib.util
+    name = "_etsprod_gen_product"
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    saved_path, saved_bc = list(sys.path), sys.dont_write_bytecode
+    sys.path.insert(0, str(Path(path).parent))
+    sys.dont_write_bytecode = True    # leave no __pycache__ in the ETS repo
+    sys.modules[name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path[:] = saved_path
+        sys.dont_write_bytecode = saved_bc
+        sys.modules.pop(name, None)
+    return mod
+
+
+Section("KNX object map (mirror 17)")
+_ets = etsprod_repo()
+_ets_json = _ets / "knx_objects.json"
+_ets_gen = _ets / "tools/gen_product.py"
+_knx_hdr = Path(cfg.CORE_REPO) / "libraries/OpenPLC_KNX/src/openplc_knx_objects.h"
+_name = "openplc_knx_objects.h generated from knx_objects.json"
+_missing = [str(q) for q in (_ets_json, _ets_gen, _knx_hdr) if not q.exists()]
+if _missing:
+    Warn("SKIP  %s" % _name)
+    for _m in _missing:
+        Warn("        missing: %s" % _m)
+    skipped += 1
+else:
+    try:
+        _gen = load_generator(_ets_gen)
+        _want = _gen.render_header(_gen.load_config(str(_ets_json)))
+    except Exception as e:
+        Fail("FAIL  %s" % _name)
+        Fail("        %s could not render the header: %s: %s" % (_ets_gen, type(e).__name__, e))
+        failed += 1
+    else:
+        # CRLF folded as in compare_bytes: a checkout's line endings are not drift.
+        _want = _want.encode("utf-8").replace(b"\r\n", b"\n")
+        _have = _knx_hdr.read_bytes().replace(b"\r\n", b"\n")
+        if _want == _have:
+            Ok("OK    %s  (%d bytes, identical)" % (_name, len(_have)))
+        else:
+            Fail("DIFF  %s" % _name)
+            Fail("        source    %s" % _ets_json)
+            Fail("        generated %s  (%d bytes, generator gives %d)"
+                 % (_knx_hdr, len(_have), len(_want)))
+            Fail("        fix: run `python tools/gen_product.py` in OpenPLC_ETS_Prod;")
+            Fail("        do not hand-edit the header.")
+            failed += 1
 
 # --- what this script does not check ----------------------------------------
 Section("not covered by this script -- still manual")

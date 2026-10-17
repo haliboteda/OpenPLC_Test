@@ -56,19 +56,20 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from common import (Fail, Ok, Section, Warn, cfg, close_ports,  # noqa: E402
+from common import (board_ip, Fail, Ok, Section, Warn, boot_log_next,  # noqa: E402
                     emit_file, get_iap_tool, get_programmer_cli,
-                    get_scratch_dir, get_scratch_file, open_log_ports,
-                    read_log_ports, run_capture, run_while_draining,
-                    target_voltage, tcp_command, wait_for_board)
+                    get_scratch_dir, get_scratch_file, read_boot_log_swd,
+                    run_capture, run_while_draining, target_voltage,
+                    tcp_command, wait_boot_log_swd, wait_for_board)
 
 # The application region. $PROD/docs/modules/M1-firmware-upgrade.md, "地址布局".
 APP_BASE = 0x08020000
 APP_SIZE = 1792 * 1024
 
-# Printed on every boot whatever the ownership state, so its absence means the
-# capture failed rather than the board having nothing to say.
-LOG_CAPTURE_PROOF = "Bootloader state:"
+# Logged on every boot whatever the ownership state, so its absence means the
+# capture failed rather than the board having nothing to say. The board's lines
+# are read from the SRAM4 buffer over SWD: it is in the bootloader here.
+LOG_CAPTURE_PROOF = "[sys][BL] Bootloader state:"
 
 # The two shapes IAPTool's own refusal takes: a key that certifies itself, and
 # a key carrying a certificate from some other root.
@@ -146,25 +147,24 @@ def first_difference(a, b):
             off += len(ca)
 
 
-def upload(iap, image, ip, key, ports, tag, tail_seconds):
+def upload(iap, cli, image, ip, key, tag, tail_seconds):
     """One real upload through the shipping tool. Returns (exit code, log text)."""
     Section("Upload with the %s key" % tag)
-    open_ports = open_log_ports(ports)
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
     argv = [str(iap), "ether", str(image), ip, "--key=%s" % key]
     print("IAPTool %s" % " ".join(argv[1:]))
-    rc, buf = run_while_draining(argv, open_ports,
-                                 get_scratch_file("t2-10-%s.out" % tag),
-                                 get_scratch_file("t2-10-%s.err" % tag),
-                                 tail_seconds=tail_seconds)
-    close_ports(open_ports)
+    rc, _ = run_while_draining(argv, {},
+                               get_scratch_file("t2-10-%s.out" % tag),
+                               get_scratch_file("t2-10-%s.err" % tag),
+                               tail_seconds=tail_seconds)
     Section("IAPTool output (exit %d)" % rc)
     emit_file(get_scratch_file("t2-10-%s.out" % tag))
     emit_file(get_scratch_file("t2-10-%s.err" % tag))
-    for name, text in buf.items():
-        Section("%s  (%d bytes)" % (name, len(text)))
-        if text:
-            print(text)
-    return rc, "\n".join(buf.values())
+    text = "\n".join(t for _, t in read_boot_log_swd(cli, since=mark) or [])
+    Section("boot log  (%d bytes)" % len(text))
+    if text:
+        print(text)
+    return rc, text
 
 
 def main():
@@ -181,13 +181,11 @@ def main():
                     help="how much of the application region to compare")
     ap.add_argument("--seconds", type=int, default=10)
     ap.add_argument("--tail-seconds", type=int, default=6)
-    ap.add_argument("--ports", nargs="*", default=None)
     args = ap.parse_args()
 
-    ports = args.ports if args.ports else cfg.LOG_PORTS
-    ip = args.ip or getattr(cfg, "BOARD_IP", "")
+    ip = args.ip or board_ip()
     if not ip:
-        Fail("need --ip (or set BOARD_IP in config/machine.py)")
+        Fail("need --ip (or BOARD_UID in config/machine.py)")
         return 2
     image = Path(args.bin)
     if not image.exists():
@@ -213,20 +211,18 @@ def main():
 
     # ------------------------------------------------------------ preconditions
     Section("Boot log")
-    open_ports = open_log_ports(ports)
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
     subprocess.run([str(cli), "-c", "port=SWD", "mode=UR", "-rst"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    buf = read_log_ports(open_ports, args.seconds)
-    for name, text in buf.items():
-        Section("%s  (%d bytes)" % (name, len(text)))
-        if text:
-            print(text)
-    log = "\n".join(buf.values())
+    log = wait_boot_log_swd(cli, mark, args.seconds)
+    Section("SRAM4 boot log  (%d bytes)" % len(log))
+    if log:
+        print(log)
 
     Section("Precondition")
     if LOG_CAPTURE_PROOF not in log:
         Warn("SETUP - no boot log captured (%d bytes); the board's state is unknown." % len(log))
-        Warn("  Check the log ports listed above.")
+        Warn("  Is this bootloader new enough to keep the SRAM4 boot log?")
         return 2
     Ok("  boot log            captured")
 
@@ -283,7 +279,7 @@ def main():
     Ok("  sha256 %s" % d_before)
 
     # ------------------------------------------------ the case: old root image
-    rc_old, _ = upload(iap, image, ip, old_key, ports, "old-root", args.tail_seconds)
+    rc_old, _ = upload(iap, cli, image, ip, old_key, "old-root", args.tail_seconds)
 
     Section("Application region after the refused upload")
     after = dump_app_region(cli, nbytes, "after")
@@ -295,7 +291,7 @@ def main():
     # ------------------------------------------------------- positive control
     if not wait_for_board(ip, timeout=60.0):
         Warn("the board stopped answering discovery after the refused upload")
-    rc_cur, _ = upload(iap, image, ip, cur_key, ports, "current-root", args.tail_seconds)
+    rc_cur, _ = upload(iap, cli, image, ip, cur_key, "current-root", args.tail_seconds)
 
     Section("Application region after the control upload")
     control = dump_app_region(cli, nbytes, "control")

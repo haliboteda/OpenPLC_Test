@@ -26,7 +26,8 @@ from pathlib import Path
 # init_machine.py, which runs before config/machine.py exists, can share them.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from platform_info import (PLATFORM, IS_WIN, EXE, GOOS_DIR, A15_DIR,  # noqa: E402,F401
-                           CUBE_PLUG, Section, Ok, Warn, Fail, _emit)
+                           CUBE_PLUG, Section, Ok, Warn, Fail, _emit,
+                           cube_layout, discover_boards)
 
 
 # ---------------------------------------------------------------- config
@@ -232,7 +233,7 @@ def get_programmer_cli():
     verified; if the lookup fails on Linux, the printed glob is the thing to
     compare against the real install.
     """
-    pattern = (Path(cfg.CUBEIDE) / "STM32CubeIDE" / "plugins"
+    pattern = (cube_layout(cfg.CUBEIDE)[0]
                / ("com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.%s_*" % CUBE_PLUG)
                / "tools" / "bin" / ("STM32_Programmer_CLI" + EXE))
     hit = _newest(pattern)
@@ -244,10 +245,9 @@ def get_programmer_cli():
 
 def get_cube_ide_exe():
     """The headless launcher, whose name differs per platform."""
-    name = "stm32cubeidec.exe" if IS_WIN else "stm32cubeide"
-    exe = Path(cfg.CUBEIDE) / "STM32CubeIDE" / name
+    exe = cube_layout(cfg.CUBEIDE)[1]
     if not exe.exists():
-        Fail("%s not found at %s" % (name, exe))
+        Fail("%s not found at %s" % (exe.name, exe))
         sys.exit(1)
     return exe
 
@@ -368,25 +368,31 @@ def get_port_holder_hint():
             names = out.split()
     except Exception:
         return None
-    hits = sorted({n for n in names for k in known if k in n.lower()})
+    # Whole name, allowing a non-letter suffix ("sscom5.13.1.exe", "Arduino IDE.exe"),
+    # so "cu" does not match cupsd; macOS ps prints full paths.
+    pat = re.compile(r"^(%s)(?![a-z])" % "|".join(known))
+    hits = sorted({n for n in names if pat.match(os.path.basename(n).lower())})
     return ", ".join(hits) if hits else None
 
 
-def open_log_ports(ports):
-    """Open every port that can be opened; report the ones that cannot and name
-    the likely culprit. Returns a dict of name -> Serial.
+def open_rs232_ports(ports):
+    """Open the RS232 adapter port(s) on terminals C05/C06 -- what a sketch prints
+    with RS232; the board's own log is on USB port 1 (open_board_log()). Reports
+    the ports that cannot be opened and names the likely culprit. Returns a dict
+    of name -> Serial.
     """
     serial = _import_serial()
     if serial is None:
         return {}
+    baud = getattr(cfg, "RS232_BAUD", 115200)
     open_ports = {}
     for p in ports:
         if not p:
             continue
         try:
-            h = serial.Serial(p, cfg.LOG_BAUD, timeout=0.3)
+            h = serial.Serial(p, baud, timeout=0.3)
             open_ports[p] = h
-            print("listening on %s @ %d" % (p, cfg.LOG_BAUD))
+            print("listening on %s @ %d" % (p, baud))
         except Exception as e:
             msg = str(e)
             Warn("cannot open %s: %s" % (p, msg))
@@ -417,39 +423,278 @@ def decode_serial(data):
     return data.decode("ascii", errors="replace").replace("�", "?")
 
 
-# The board says this when it came up with BOOT0 held through the startup
-# window. It is how a script knows the operator did the gesture: the BOARD
-# reports it, so nobody has to walk back to the keyboard to confirm.
-LOG_BOOT0_UPLOAD = "UPLOAD Mod ... (BOOT0 held)"
+# ---------------------------------------------------------------- board log
+# The board's system log: on USB port 1 while the app runs, and always in the
+# SRAM4 buffer. Which test reads it where: $PROD/docs/engineering/HOW-TO-RUN-TESTS.md
+# 「测试从哪读板子的输出」; line prefixes and buffer layout: $PROD/docs/modules/M1/BOOT-LOG.md.
+BOARD_USB_VID, BOARD_USB_PID = 0x0483, 0x5740   # bootloader and core usbd_desc.c
+# CDC communication interface of USB port 1. With two CDC ports (IDE-17) port 2
+# is the next one; a single-CDC board reports no interface number on Windows.
+BOARD_LOG_INTERFACE = 0
+SYS = "[sys]"
+# The app's first line. When it arrives, this boot's bootloader lines are out too:
+# the app sends the buffer in order.
+APP_BOOTED = "[sys][BOOT] "
+
+BOOT_LOG_ADDR, BOOT_LOG_SIZE, BOOT_LOG_HDR = 0x38000020, 4096, 32
+BOOT_LOG_MAGIC, BOOT_LOG_VERSION, BOOT_LOG_SYNC, BOOT_LOG_LINE_MAX = 0x474F4C50, 1, 0xA5, 200
 
 
-def wait_for_boot0_upload_mode(ports, timeout):
-    """Watch the log ports until the board says BOOT0 was held.
+def sys_line(tag, text=""):
+    """'[sys][<tag>] <text>', how every system line starts. tag: BL, BOOT, NET,
+    KNX, FAULT, LOG."""
+    return "[sys][%s] %s" % (tag, text)
 
-    Returns (seen, text). Without this a script races the human: it prints
-    "hold BOOT0 now" and then queries the board microseconds later, which on
-    an unattended run means the answer is always "not held".
+
+def board_usb_serial(uid):
+    """The USB serial number the board enumerates with, from a BOARD_UID
+    ('%08X%08X%08X' of UID words 2, 1, 0); None if uid is not that shape.
+    Get_SerialNum() in both usbd_desc.c: word0 + word2 as 8 hex digits, then
+    the top 4 hex digits of word1."""
+    if not re.match(r"^[0-9A-Fa-f]{24}$", uid or ""):
+        return None
+    w2, w1, w0 = (int(uid[i:i + 8], 16) for i in (0, 8, 16))
+    return "%08X%04X" % ((w0 + w2) & 0xFFFFFFFF, w1 >> 16)
+
+
+def _usb_interface(info):
+    """bInterfaceNumber from a pyserial location ('1-2:1.0', '1-2:x.0'), or None."""
+    m = re.search(r":(?:x|\d+)\.(\d+)$", info.location or "")
+    return int(m.group(1)) if m else None
+
+
+def find_board_log_ports(uid=None, interface=BOARD_LOG_INTERFACE):
+    """Device names of the board's USB port 1 right now, by VID/PID, the USB
+    serial number derived from uid (any board when uid is empty) and, where the
+    platform reports it, the interface number."""
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        return []
+    want = board_usb_serial(uid) if uid else None
+    hits = []
+    for p in list_ports.comports():
+        if p.vid != BOARD_USB_VID or p.pid != BOARD_USB_PID:
+            continue
+        if want and (p.serial_number or "").upper() != want:
+            continue
+        iface = _usb_interface(p)
+        if iface is not None and iface != interface:
+            continue
+        hits.append(p.device)
+    return sorted(hits)
+
+
+class BoardLog(object):
+    """The board's USB port 1, shaped like a pyserial port (in_waiting, read,
+    close) so read_log_ports(), run_while_draining() and close_ports() take it.
+
+    Opens with DTR set: the app sends the log only then. The port disappears at
+    every reset, bootloader/app handover and upload; the next read finds it again
+    by VID/PID + BOARD_UID and reopens it. While the board sits in the bootloader
+    there is no port 1 and nothing arrives -- read_boot_log_swd() reads the buffer.
+    sys_only drops lines that do not start with [sys] (what the sketch prints).
     """
-    import time
-    open_ports = open_log_ports(ports)
-    if not open_ports:
-        return False, ""
-    text = ""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        for h in open_ports.values():
+
+    REFIND_S = 0.3
+
+    def __init__(self, uid=None, interface=BOARD_LOG_INTERFACE, sys_only=False):
+        self.uid = getattr(cfg, "BOARD_UID", "") if uid is None else uid
+        self.interface = interface
+        self.sys_only = sys_only
+        self.port = None
+        self._serial = _import_serial()
+        self._h = None
+        self._next_try = 0.0
+        self._partial = b""
+        self._ready = b""
+        self._closed = self._serial is None
+
+    def _open(self):
+        now = time.monotonic()
+        if now < self._next_try:
+            return
+        self._next_try = now + self.REFIND_S
+        hits = find_board_log_ports(self.uid, self.interface)
+        if not hits:
+            return
+        h = self._serial.Serial()
+        h.port, h.baudrate, h.timeout = hits[0], 115200, 0
+        h.dtr = True
+        try:
+            h.open()
+        except Exception:
+            return   # still enumerating, or another program holds it; try again
+        self._h, self.port = h, hits[0]
+        print("listening on %s (board USB port 1)" % self.port)
+
+    def _drop(self):
+        if self._h is not None:
             try:
-                n = h.in_waiting
-                if n:
-                    text += decode_serial(h.read(n))
+                self._h.close()
             except Exception:
                 pass
-        if LOG_BOOT0_UPLOAD in text:
-            close_ports(open_ports)
-            return True, text
-        time.sleep(0.1)
-    close_ports(open_ports)
-    return False, text
+        self._h, self._partial = None, b""
+
+    def _pump(self):
+        if self._closed:
+            return
+        if self._h is None:
+            self._open()
+            if self._h is None:
+                return
+        try:
+            n = self._h.in_waiting
+            data = self._h.read(n) if n else b""
+        except Exception:
+            self._drop()   # the port went away
+            return
+        if not self.sys_only:
+            self._ready += data
+            return
+        lines = (self._partial + data).split(b"\n")
+        self._partial = lines.pop()
+        self._ready += b"".join(ln + b"\n" for ln in lines if ln.startswith(SYS.encode()))
+
+    @property
+    def in_waiting(self):
+        self._pump()
+        return len(self._ready)
+
+    def read(self, n=1):
+        self._pump()
+        data, self._ready = self._ready[:n], self._ready[n:]
+        return data
+
+    def close(self):
+        self._closed = True
+        self._drop()
+
+    def lines(self, seconds, until=None):
+        """Yield complete lines (no line end) for up to `seconds`; stop after
+        the first one matching `until` (regex or pattern string)."""
+        if isinstance(until, str):
+            until = re.compile(until)
+        deadline = time.monotonic() + seconds
+        rest = ""
+        while time.monotonic() < deadline:
+            rest += decode_serial(self.read(1 << 16))
+            *done, rest = rest.split("\n")
+            for ln in done:
+                ln = ln.rstrip("\r")
+                yield ln
+                if until is not None and until.search(ln):
+                    return
+            time.sleep(0.05)
+
+
+def open_board_log(sys_only=False, fresh=True):
+    """{"usb1": BoardLog}, ready for read_log_ports() / run_while_draining().
+
+    fresh: drop what arrives right after opening -- lines a host never read,
+    from before this call, which would otherwise pass for this run's.
+    """
+    log = BoardLog(sys_only=sys_only)
+    if fresh:
+        deadline, quiet = time.monotonic() + 3.0, time.monotonic() + 1.0
+        while time.monotonic() < min(deadline, quiet):
+            if log.read(1 << 16):
+                quiet = time.monotonic() + 0.5
+            time.sleep(0.05)
+    if log.port is None and not log._closed:
+        print("board USB port 1 not there yet; it is opened when it appears")
+    return {"usb1": log}
+
+
+def _crc8(data):
+    crc = 0
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
+
+
+def parse_boot_log(data):
+    """The SRAM4 buffer (BOOT_LOG_SIZE bytes from BOOT_LOG_ADDR) as
+    [(seq, line)], oldest first. [] when the header is not valid; stops at the
+    first bad record, as the firmware's own check would reject the rest."""
+    import struct
+    if len(data) < BOOT_LOG_SIZE:
+        return []
+    magic, ver, size, head, tail, seq, sent, check = struct.unpack_from("<IHHIIIII", data, 0)
+    if (magic, ver, size) != (BOOT_LOG_MAGIC, BOOT_LOG_VERSION, BOOT_LOG_SIZE):
+        return []
+    if check != ~(magic ^ ver ^ size ^ head ^ tail ^ seq ^ sent) & 0xFFFFFFFF:
+        return []
+    ring = data[BOOT_LOG_HDR:BOOT_LOG_SIZE]
+    rsize = len(ring)
+    if head >= rsize or tail >= rsize:
+        return []
+    texts, off, used = [], tail, (head - tail) % rsize
+    while used > 5:
+        rec = bytes(ring[(off + i) % rsize] for i in range(min(used, 5 + BOOT_LOG_LINE_MAX)))
+        n = rec[1]
+        if rec[0] != BOOT_LOG_SYNC or not 0 < n <= BOOT_LOG_LINE_MAX or 5 + n > used:
+            break
+        if _crc8(rec[1:4 + n]) != rec[4 + n]:
+            break
+        texts.append(rec[4:4 + n].decode("ascii", errors="replace"))
+        off, used = (off + 5 + n) % rsize, used - 5 - n
+    first = seq - len(texts)
+    return [(first + i, t) for i, t in enumerate(texts)]
+
+
+def read_boot_log_swd(cli=None, since=None):
+    """The SRAM4 buffer read over SWD without halting the board, as
+    parse_boot_log() gives it; None if the read failed. For a board that stays
+    in the bootloader, where USB port 1 does not exist.
+
+    since: keep records numbered since or later -- pass boot_log_next(an earlier
+    read) to get only what was written after it. A buffer restarted by a
+    power-on numbers from 0 again; then everything is kept."""
+    from reset_board_to_factory_state import read_bytes   # it imports this module
+    data = read_bytes(cli or get_programmer_cli(), BOOT_LOG_ADDR, BOOT_LOG_SIZE)
+    if data is None:
+        return None
+    recs = parse_boot_log(data)
+    if since is not None and recs and recs[-1][0] >= since - 1:
+        recs = [(s, t) for s, t in recs if s >= since]
+    return recs
+
+
+def boot_log_next(recs):
+    """The number the next record will get, for read_boot_log_swd(since=...)."""
+    return recs[-1][0] + 1 if recs else 0
+
+
+def wait_boot_log_swd(cli, since, seconds, until=None, poll=2.0):
+    """Text of the records numbered since or later, read over SWD every `poll`
+    seconds until one contains `until` (a substring) or `seconds` pass."""
+    deadline = time.monotonic() + seconds
+    while True:
+        text = "\n".join(t for _, t in read_boot_log_swd(cli, since=since) or [])
+        if (until is not None and until in text) or time.monotonic() >= deadline:
+            return text
+        time.sleep(poll)
+
+
+def board_role(ip, timeout=2.0):
+    """ROLE from the board's discovery reply: "BOOTLD" (or "BOOTLD-INVALID")
+    in the bootloader, "CUSAPP" in the app ($BOOT Core/Inc/IAP_config.h, core
+    stm32/IAP_config.h); "" when it does not answer."""
+    import socket
+    from platform_info import DISCOVERY_PORT, parse_identity
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.settimeout(timeout)
+        s.sendto(b"openplc_discover", (ip, DISCOVERY_PORT))
+        got = parse_identity(s.recvfrom(512)[0].decode("ascii", errors="replace").strip())
+        return got[1] if got else ""
+    except OSError:
+        return ""
+    finally:
+        s.close()
 
 
 def read_log_ports(open_ports, seconds, until=None, until_count=1):
@@ -490,6 +735,42 @@ def read_log_ports(open_ports, seconds, until=None, until_count=1):
 
 
 # ---------------------------------------------------------------- board
+BOARD_DISCOVERY_S = 20.0   # a board just reset into the bootloader can take ~20 s to answer on WLAN (IDE-16)
+_board_ip_cache = []
+
+
+def board_ip(timeout=BOARD_DISCOVERY_S):
+    """The board's current IP: BOARD_IP if set, else found by BOARD_UID.
+
+    The address comes from DHCP and moves, so the UID is what is configured
+    (see $PROD/docs/engineering/HOW-TO-RUN-TESTS.md, "$TEST 的本机配置").
+    Returns "" after printing why when the board cannot be found.
+    """
+    override = getattr(cfg, "BOARD_IP", "")
+    if override:
+        return override
+    if _board_ip_cache:
+        return _board_ip_cache[0]
+    uid = getattr(cfg, "BOARD_UID", "")
+    if not uid:
+        Fail("no BOARD_UID in config/machine.py: run tools/init_machine.py with "
+             "exactly one board on the network, or --set BOARD_UID=<uid>")
+        return ""
+    found = discover_boards(timeout, want_uid=uid)
+    if uid in found:
+        _board_ip_cache.append(found[uid][0])
+        return found[uid][0]
+    Fail("board %s did not answer openplc_discover within %.0f s" % (uid, timeout))
+    if found:
+        for other, (ip, reply) in sorted(found.items()):
+            Warn("  answered instead: %s at %s (%s)" % (other, ip, reply))
+    else:
+        Warn("  no board answered at all")
+    Warn("  a board just reset into the bootloader can take ~20 s to answer on WLAN;")
+    Warn("  if broadcast cannot reach it, pass --ip or set BOARD_IP in config/machine.py")
+    return ""
+
+
 def wait_for_board(ip, timeout=60.0, port=None):
     """Wait until the board answers UDP discovery. Returns True, or False on timeout.
 
@@ -630,7 +911,7 @@ def probe(verbose=True):
     # The programmer and IAPTool are resolved by wildcard, so report what the
     # lookup found rather than what config says -- that is the value the scripts
     # will use.
-    hit = _newest(Path(cfg.CUBEIDE) / "STM32CubeIDE" / "plugins"
+    hit = _newest(cube_layout(cfg.CUBEIDE)[0]
                   / ("com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.%s_*" % CUBE_PLUG)
                   / "tools" / "bin" / ("STM32_Programmer_CLI" + EXE))
     if hit:
@@ -653,18 +934,19 @@ def probe(verbose=True):
         missing.append("shipped IAPTool")
 
     if verbose:
-        print("  %-19s %s" % ("log ports (config)", ", ".join(cfg.LOG_PORTS)))
-        for p in cfg.LOG_PORTS:
-            if IS_WIN or not p:
-                continue
-            # COMn is not a device name here. Saying "check the adapter and the
-            # dialout group" for one sends the reader after hardware when the
-            # config is what needs editing.
-            if re.match(r'^COM\d+$', p, re.I):
-                Warn("  %-19s %s is a Windows port name -- config/machine.py still has "
-                     "the Windows block" % ("", p))
-            elif not Path(p).exists():
-                Warn("  %-19s %s does not exist -- check the adapter and the dialout group" % ("", p))
+        usb = find_board_log_ports(getattr(cfg, "BOARD_UID", ""))
+        print("  %-19s %s" % ("board USB port 1", ", ".join(usb) if usb else
+                              "(not enumerated now: board off, in the bootloader, or no USB)"))
+        p = getattr(cfg, "RS232_PORT", "")
+        print("  %-19s %s" % ("RS232 port (config)", p))
+        # COMn is not a device name here. Saying "check the adapter and the
+        # dialout group" for one sends the reader after hardware when the
+        # config is what needs editing.
+        if p and not IS_WIN and re.match(r'^COM\d+$', p, re.I):
+            Warn("  %-19s %s is a Windows port name -- config/machine.py still has "
+                 "the Windows block" % ("", p))
+        elif p and not IS_WIN and not Path(p).exists():
+            Warn("  %-19s %s does not exist -- check the adapter and the dialout group" % ("", p))
 
     if verbose:
         if missing:

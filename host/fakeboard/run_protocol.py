@@ -140,9 +140,9 @@ def group_reclaim(b, image, owner_pub, owner_key):
     _, log3 = b.board("meta", [], lambda: None)
     after = flash.read_bytes()[base:base + len(calib)]
     p = []
-    if added == 0 or s15.JOURNAL_FULL not in log1:
+    if added == 0 or s15.JOURNAL_FULL_TEXT not in log1:
         p.append("the board did not report the metadata area full")
-    if s15.RECLAIMING not in log2:
+    if s15.RECLAIMING_TEXT not in log2:
         p.append("the upload did not reclaim sector 15")
     if after != calib:
         p.append("the calibration area changed")

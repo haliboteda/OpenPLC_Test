@@ -16,8 +16,10 @@ first and written back. Ownership and application are gone afterwards.
 
 The verdict needs BOTH kinds of evidence, because either alone can lie:
 
-  flash reads  -- read back over SWD; independent of the serial port entirely
-  boot log     -- what the bootloader says about itself
+  flash reads  -- read back over SWD
+  boot log     -- what the bootloader says about itself, read from the SRAM4
+                  buffer over SWD: a factory board stays in the bootloader,
+                  which has no USB port 1
 
 An empty capture is INCONCLUSIVE, never PASS: a log that was never captured
 looks exactly like a log that said nothing.
@@ -28,14 +30,15 @@ import re
 import struct
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from common import (Fail, Ok, Section, Warn, assert_target_reachable,  # noqa: E402
-                    cfg, get_programmer_cli, get_scratch_file, open_log_ports,
-                    read_log_ports)
+                    boot_log_next, cfg, get_programmer_cli, get_scratch_file,
+                    read_boot_log_swd)
 from flash_bootloader import looks_like_bootloader  # noqa: E402
 
 # Sector 15 layout: $PROD/docs/modules/M1/SECTOR-15.md; must match
@@ -52,10 +55,14 @@ APP_BASE = 0x08020000
 
 # What the bootloader prints on a board with no root and no firmware metadata
 # ($BOOT/IAPServer/owner_slot.c, bootloader_state.c).
-LOG_NO_ROOT = "Owner slot: empty - no root"
-LOG_METADATA_EMPTY = re.compile(r"Bootloader state: 0/\d+ metadata slots used, metadata absent")
+LOG_NO_ROOT = "[sys][BL] Owner slot: empty - no root"
+LOG_METADATA_EMPTY = re.compile(r"\[sys\]\[BL\] Bootloader state: 0/\d+ metadata slots used, metadata absent")
 # Proves the capture worked at all.
-LOG_CAPTURE_PROOF = "Bootloader state:"
+LOG_CAPTURE_PROOF = "[sys][BL] Bootloader state:"
+
+
+# Largest region STM32_Programmer_CLI's -r32 returns in one call.
+R32_MAX = 32 * 1024
 
 
 def read_words(cli, addr, nbytes):
@@ -63,16 +70,24 @@ def read_words(cli, addr, nbytes):
 
     ⚠️ STM32_Programmer_CLI's -r32 length is in BYTES, not words -- passing a
     word count silently reads a quarter of the region and reports it blank.
+    ⚠️ -r32 refuses more than 32 KiB per call ("Read 32-bit max size allowed is
+    32Kbytes", CubeProgrammer 2.2.400), so larger regions are read in chunks.
     """
-    out = subprocess.run(
-        [str(cli), "-c", "port=SWD", "mode=HOTPLUG", "-r32", hex(addr), hex(nbytes)],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, errors="replace").stdout or ""
     words = []
-    for line in out.splitlines():
-        m = re.match(r"^0x[0-9A-Fa-f]{8}\s*:\s*(.*)$", line.strip())
-        if m:
-            words.extend(int(w, 16) for w in m.group(1).split())
+    for off in range(0, nbytes, R32_MAX):
+        size = min(R32_MAX, nbytes - off)
+        out = subprocess.run(
+            [str(cli), "-c", "port=SWD", "mode=HOTPLUG", "-r32", hex(addr + off), hex(size)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, errors="replace").stdout or ""
+        got = []
+        for line in out.splitlines():
+            m = re.match(r"^0x[0-9A-Fa-f]{8}\s*:\s*(.*)$", line.strip())
+            if m:
+                got.extend(int(w, 16) for w in m.group(1).split())
+        if len(got) * 4 < size:
+            return None
+        words.extend(got[:size // 4])
     return words if words else None
 
 
@@ -128,10 +143,8 @@ def main():
     ap.add_argument("--elf", default="",
                     help="bootloader ELF to flash (default: $BOOT/Debug)")
     ap.add_argument("--seconds", type=int, default=12)
-    ap.add_argument("--ports", nargs="*", default=None)
     args = ap.parse_args()
 
-    ports = args.ports if args.ports else cfg.LOG_PORTS
     elf = Path(args.elf) if args.elf else Path(cfg.BOOT_REPO) / "Debug" / "open_plc_cube_ide.elf"
     cli = get_programmer_cli()
 
@@ -186,15 +199,14 @@ def main():
                 return 1
 
     Section("Reset + capture boot log")
-    open_ports = open_log_ports(ports)
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
     subprocess.run([str(cli), "-c", "port=SWD", "mode=UR", "-rst"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    buf = read_log_ports(open_ports, args.seconds)
-    log = "\n".join(buf.values())
-    for k, v in buf.items():
-        Section("%s  (%d bytes)" % (k, len(v)))
-        if v:
-            print(v)
+    time.sleep(args.seconds)
+    log = "\n".join(t for _, t in read_boot_log_swd(cli, since=mark) or [])
+    Section("SRAM4 boot log  (%d bytes)" % len(log))
+    if log:
+        print(log)
 
     # ---------------------------------------------------------------- verdict
     Section("Factory-state verdict")
@@ -241,7 +253,7 @@ def main():
     if flash_ok and not captured:
         Warn("INCONCLUSIVE - flash reads say factory state, but no boot log arrived.")
         Warn("  A log that was never captured looks exactly like a log that said")
-        Warn("  nothing, so this is not a PASS. Check the log ports listed above.")
+        Warn("  nothing, so this is not a PASS. Is this bootloader new enough to keep the SRAM4 log?")
         return 2
     Fail("FAIL - this board is NOT in factory state.")
     return 1

@@ -43,8 +43,8 @@ sys.path.insert(0, str(HERE))
 from common import Fail, Ok, Section, cfg, get_output_dir, get_scratch_dir, run_capture  # noqa: E402
 
 SKETCH = HERE.parent / "onboard" / "iap_probe"
-FQBN = ("OpenPLC_Alpha:stm32:OPEN-PLC:pnum=PLC_H743,usb=CDCgen,xusb=FS,"
-        "upload_method=cdcMethod,knxrole=dual_device")
+FQBN = ("OpenPLC_Alpha:stm32:OPEN-PLC:pnum=PLC_H743,usb=CDCgen,"
+        "upload_method=cdcMethod")
 
 # Where the app's vector table has to land. The linker gets it from
 # build.flash_offset; P15 keeps that value 1024-aligned, and this keeps a given

@@ -7,7 +7,7 @@
  */
 
 #include "IAP_config.h"
-#include "OpenPLC_IAP_Autostart.h"
+#include "openplc_net.h"
 #include "openplc_app_version.h"
 #include "openplc_rng.h"
 #include "main.h"
@@ -40,7 +40,7 @@ int main(int argc, char **argv)
 	host_hal_init();
 	bridge_init(OPENPLC_SERVER_PORT, host_args.port, host_args.discovery_port);
 
-	openplc_udp_server_start(NULL);
+	openplc_udp_server_start();
 	host_log("app %s serving on %u", openplc_app_version, (unsigned)host_args.port);
 	for (;;) {
 		bridge_poll(10);

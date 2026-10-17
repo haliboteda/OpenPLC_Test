@@ -33,10 +33,10 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, Section, Ok, Warn, Fail, close_ports,  # noqa: E402
+from common import (board_ip, Section, Ok, Warn, Fail, boot_log_next,  # noqa: E402
                     get_iap_tool, get_programmer_cli, get_scratch_file,
-                    open_log_ports, python_exe, run_capture,
-                    run_while_draining, tcp_command)
+                    python_exe, read_boot_log_swd, run_capture,
+                    run_while_draining, tcp_command, wait_boot_log_swd)
 
 HERE = Path(__file__).resolve().parent
 
@@ -65,7 +65,7 @@ def ask_info(ip, port, tries=12):
     return reply
 
 
-def step_the_app_aside(ip, owner_key, ports, seconds):
+def step_the_app_aside(ip, owner_key, seconds):
     """Reboot a running application into the bootloader.
 
     A board with a valid application boots straight into it, and the
@@ -80,8 +80,6 @@ def step_the_app_aside(ip, owner_key, ports, seconds):
             "--seconds", str(int(seconds))]
     if owner_key:
         argv += ["--key", str(owner_key)]
-    if ports:
-        argv += ["--ports"] + list(ports)
     Warn("  an application is holding the port; asking it to reboot")
     proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if proc.returncode != 0:
@@ -93,26 +91,21 @@ def step_the_app_aside(ip, owner_key, ports, seconds):
     return True
 
 
-def board_banner(ports, seconds, ip, port=IAP_PORT, reset=True, owner_key=None):
+def board_banner(seconds, ip, port=IAP_PORT, reset=True, owner_key=None):
     """Reset over SWD, then ask the board which bootloader it is running.
 
-    Returns (banner_reply, boot_log). The boot log is printed for the operator
-    -- it is where ownership and the app verdict show up -- but the version
-    itself only exists as the reply to `info`.
+    Returns (banner_reply, boot_log). The boot log, read from the SRAM4 buffer
+    over SWD, is printed for the operator -- it is where ownership and the app
+    verdict show up -- but the version itself only exists as the reply to `info`.
 
     reset=False leaves the board alone.
     """
     log = ""
     if reset:
-        open_ports = open_log_ports(ports)
-        rc, buf = run_while_draining([str(get_programmer_cli()), "-c", "port=SWD",
-                                      "mode=UR", "-rst"],
-                                     open_ports,
-                                     get_scratch_file("flashboot_reset.out"),
-                                     get_scratch_file("flashboot_reset.err"),
-                                     tail_seconds=seconds)
-        close_ports(open_ports)
-        log = "\n".join(buf.values())
+        cli = get_programmer_cli()
+        mark = boot_log_next(read_boot_log_swd(cli) or [])
+        run_capture([str(cli), "-c", "port=SWD", "mode=UR", "-rst"])
+        log = wait_boot_log_swd(cli, mark, seconds)
 
     # The board answers only once lwIP is up, which is a little after the
     # boot log goes quiet. Retry rather than time it.
@@ -120,7 +113,7 @@ def board_banner(ports, seconds, ip, port=IAP_PORT, reset=True, owner_key=None):
     if not BANNER_RE.search(reply):
         # Either the board is still coming up, or an application is running
         # and holding the port. Only the second is fixable from here.
-        if step_the_app_aside(ip, owner_key, ports, seconds):
+        if step_the_app_aside(ip, owner_key, seconds):
             reply = ask_info(ip, port)
     return reply, log
 
@@ -141,7 +134,6 @@ def main():
     ap.add_argument("--bin", required=True, help="the bootloader image to install")
     ap.add_argument("--key", default="", help="owner root private key (PEM)")
     ap.add_argument("--ip", default="")
-    ap.add_argument("--ports", nargs="*", default=None)
     ap.add_argument("--port", type=int, default=IAP_PORT,
                     help="the board TCP port `info` is asked on")
     ap.add_argument("--owner-key",
@@ -163,20 +155,19 @@ def main():
     if size > 128 * 1024:
         Fail("%d bytes will not fit sector 0 (128 KiB)" % size)
         return 1
-    ip = args.ip or getattr(cfg, "BOARD_IP", "")
+    ip = args.ip or board_ip()
     if not ip:
-        Fail("need --ip (or set BOARD_IP in config)")
+        Fail("need --ip (or BOARD_UID in config/machine.py)")
         return 2
     if not args.key:
         Fail("need --key: the board checks a bootloader image against the owner root")
         return 2
-    ports = list(args.ports if args.ports is not None else cfg.LOG_PORTS)
     # A board with no root has nothing to check an image against (R1-37).
     expect_refusal = args.sign_with_leaf or args.unclaimed
 
     Section("Before")
     owner_key = args.owner_key or (None if args.sign_with_leaf else args.key)
-    before, before_log = board_banner(ports, args.tail_seconds, ip, args.port,
+    before, before_log = board_banner(args.tail_seconds, ip, args.port,
                                       owner_key=owner_key)
     print(before_log)
     old = BANNER_RE.search(before)
@@ -195,16 +186,18 @@ def main():
     if expect_refusal:
         Warn("  this run expects the board to REFUSE; a success is the failure")
     cmd = [get_iap_tool(), "flashboot", str(image), ip, "--key=" + args.key]
-    open_ports = open_log_ports(ports)
-    rc, buf = run_while_draining(cmd, open_ports,
-                                 get_scratch_file("flashboot.out"),
-                                 get_scratch_file("flashboot.err"),
-                                 tail_seconds=args.tail_seconds)
-    close_ports(open_ports)
-    # Both halves of the exchange: the board narrates on serial, but its wire
+    # The board is in the bootloader, which has no USB port 1: its narration is
+    # read from the SRAM4 buffer over SWD.
+    cli = get_programmer_cli()
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
+    rc, _ = run_while_draining(cmd, {},
+                               get_scratch_file("flashboot.out"),
+                               get_scratch_file("flashboot.err"),
+                               tail_seconds=args.tail_seconds)
+    # Both halves of the exchange: the board narrates in its log, but its wire
     # answer ("Refused", "Signature Failed") only reaches IAPTool's stdout --
     # and the wire answer is what the criteria are written against.
-    during = "\n".join(buf.values())
+    during = "\n".join(t for _, t in read_boot_log_swd(cli, since=mark) or [])
     for stream in ("flashboot.out", "flashboot.err"):
         try:
             during += "\n" + Path(get_scratch_file(stream)).read_text(
@@ -214,7 +207,7 @@ def main():
     print(during)
 
     Section("After")
-    after, after_log = board_banner(ports, args.tail_seconds, ip, args.port,
+    after, after_log = board_banner(args.tail_seconds, ip, args.port,
                                     owner_key=owner_key)
     print(after_log)
     new = BANNER_RE.search(after)

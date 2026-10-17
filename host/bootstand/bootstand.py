@@ -20,8 +20,9 @@ $PROD/docs/engineering/BOOTLOADER-STAND-IN.md.
   --fail-after-*   cut power right after the Nth flash erase / program of a
                    boot; the next boot is cold and runs without the fault
 
-Exits when --lifetime runs out or a half crashes. Killing this process kills
-the running half with it (a job object on Windows, a process group elsewhere).
+Exits when --lifetime runs out or a half crashes. On Windows killing this
+process kills the running half with it (a job object); elsewhere the halves stay
+in this process's group, so kill the group (host/fakeboard/_common.py does).
 
 Exit 0 = ran its lifetime, 1 = a half crashed or failed to start.
 """
@@ -46,8 +47,6 @@ def log(msg):
 
 def kill_with_me():
     """Make every child die when this process does, however it dies."""
-    if sys.platform != "win32":
-        return None
     import ctypes
     from ctypes import wintypes
 
@@ -94,7 +93,7 @@ def adopt(job, proc):
 
 
 def exe(name, build):
-    return str(Path(build) / (name + (".exe" if sys.platform == "win32" else "")))
+    return str(Path(build) / (name + ".exe"))
 
 
 def main():
@@ -123,7 +122,6 @@ def main():
         common += ["--uid", args.uid]
 
     job = kill_with_me()
-    popen_kw = {} if sys.platform == "win32" else {"start_new_session": True}
     deadline = time.time() + args.lifetime
     half, cold, first = "boot", True, True
     faults = ["--fail-after-erase", args.fail_after_erase,
@@ -144,7 +142,7 @@ def main():
             else:
                 argv = [exe("bootstand_app", args.build)] + common
             cold = first = False
-            child = subprocess.Popen(argv, **popen_kw)
+            child = subprocess.Popen(argv)
             adopt(job, child)
             while child.poll() is None and time.time() < deadline:
                 time.sleep(0.05)

@@ -44,9 +44,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, Section, Ok, Warn, Fail, close_ports,  # noqa: E402
-                    get_programmer_cli, get_scratch_file, open_log_ports,
-                    python_exe, read_log_ports)
+from common import (board_ip, Section, Ok, Warn, Fail, boot_log_next,  # noqa: E402
+                    get_programmer_cli, get_scratch_file, python_exe,
+                    read_boot_log_swd, wait_boot_log_swd)
 
 # Sector 15: calibration 8 KiB, root area 8 KiB, metadata, and a completion
 # marker in the last 32 bytes. The programmer erases the whole sector, so every
@@ -64,9 +64,13 @@ REC_BLANK = 0xFF
 REC_LOG = 0x4C
 
 EVT_UPDATE_OK = 1
-JOURNAL_FULL = "** Metadata area full - the next successful update reclaims sector 15."
-RECLAIMING = "Reclaiming sector 15"
-APP_MOD = "** APP Mod"
+# Bootloader lines as printed (the stand-in's stdout), and as read from the
+# SRAM4 buffer over SWD, where they carry the [sys][BL] prefix.
+JOURNAL_FULL_TEXT = "** Metadata area full - the next successful update reclaims sector 15."
+RECLAIMING_TEXT = "Reclaiming sector 15"
+JOURNAL_FULL = "[sys][BL] " + JOURNAL_FULL_TEXT
+RECLAIMING = "[sys][BL] " + RECLAIMING_TEXT
+APP_MOD = "[sys][BL] ** APP Mod"
 
 
 def scan(data):
@@ -127,15 +131,13 @@ def main():
                          "it the board refuses the upload, and the reclaim this "
                          "case is about never happens.")
     ap.add_argument("--ip", default=None)
-    ap.add_argument("--ports", action="append")
     ap.add_argument("--leave", type=int, default=4,
                     help="free slots to leave; must be under the 9 a metadata "
                          "record needs, or nothing reclaims (default 4)")
     ap.add_argument("--inspect", action="store_true", help="report and change nothing")
     args = ap.parse_args()
 
-    ports = args.ports or list(cfg.LOG_PORTS)
-    ip = args.ip or cfg.BOARD_IP
+    ip = args.ip or board_ip()
     cli = str(get_programmer_cli())
 
     Section("R1-29 -- reading the state sector")
@@ -182,13 +184,11 @@ def main():
     Ok("sector written")
 
     Section("what the board says with a full journal")
-    handles = open_log_ports(ports)
     time.sleep(1)
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
     subprocess.run([cli, "-c", "port=SWD", "mode=UR", "-rst"],
                    capture_output=True, text=True, timeout=120)
-    before = read_log_ports(handles, 12)
-    close_ports(handles)
-    before_text = "\n".join(before.values()) if isinstance(before, dict) else str(before)
+    before_text = wait_boot_log_swd(cli, mark, 12)
     for line in before_text.splitlines():
         print("  " + line)
 
@@ -196,16 +196,13 @@ def main():
         Warn("the board did not report a full journal")
 
     Section("one real upload, which is where the reclaim happens")
-    handles = open_log_ports(ports)
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
     upload = [python_exe(), str(Path(__file__).with_name("upload_and_watch.py")),
               "--bin", args.bin, "--ip", ip]
     if args.key:
         upload += ["--key", args.key]
     up = subprocess.run(upload, capture_output=True, text=True, timeout=900)
-    after = read_log_ports(handles, 10)
-    close_ports(handles)
-    after_text = (up.stdout or "") + "\n" + (
-        "\n".join(after.values()) if isinstance(after, dict) else str(after))
+    after_text = (up.stdout or "") + "\n" + wait_boot_log_swd(cli, mark, 10, until=APP_MOD)
 
     Section("verdict")
     if RECLAIMING not in after_text:

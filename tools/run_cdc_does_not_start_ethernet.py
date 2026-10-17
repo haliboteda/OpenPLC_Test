@@ -27,9 +27,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, Section, Ok, Warn, Fail, get_iap_tool,  # noqa: E402
-                    get_scratch_file, local_ip_for, open_log_ports,
-                    read_log_ports, close_ports)
+from common import (board_ip, cfg, Section, Ok, Warn, Fail, boot_log_next,  # noqa: E402
+                    get_iap_tool, get_programmer_cli, get_scratch_file,
+                    local_ip_for, read_boot_log_swd)
 
 # IAP_config.h: #define OPENPLC_SERVER_PORT 56865
 DISCOVERY_PORT = 56865
@@ -92,28 +92,27 @@ def probe_discovery(ip, seconds=LISTEN_S):
     return replies
 
 
-def request_mode(argv, label, ports=None):
+def request_mode(argv, label, cli=None):
     """Ask the board for one upload mode with an image it will refuse.
 
-    Returns whatever the board printed while doing it. server_decide() names
-    the mode it picked and why, which is the only way to tell "CDC isolation
-    held" from "the board never entered CDC mode".
+    Returns what the board logged meanwhile. server_decide() names the mode it
+    picked and why, which is the only way to tell "CDC isolation held" from
+    "the board never entered CDC mode". The board stays in the bootloader, which
+    has no USB port 1, so the lines are read from the SRAM4 buffer over SWD;
+    "" without an ST-Link.
     """
     Section(label)
     out = get_scratch_file("cdc_ether.out")
     err = get_scratch_file("cdc_ether.err")
-    open_ports = open_log_ports(ports) if ports else {}
+    mark = boot_log_next(read_boot_log_swd(cli) or []) if cli else None
     with open(str(out), "wb") as so, open(str(err), "wb") as se:
         proc = subprocess.Popen(argv, stdout=so, stderr=se)
         proc.wait()
     print("  %s -> exit %d" % (" ".join(str(a) for a in argv), proc.returncode))
     time.sleep(SETTLE_S)
-    log = ""
-    if open_ports:
-        buf = read_log_ports(open_ports, 1)
-        close_ports(open_ports)
-        log = "\n".join(buf.values())
-    return log
+    if mark is None:
+        return ""
+    return "\n".join(t for _, t in read_boot_log_swd(cli, since=mark) or [])
 
 
 def verdict(cdc_replies, ether_replies, cdc_log=""):
@@ -132,9 +131,9 @@ def verdict(cdc_replies, ether_replies, cdc_log=""):
     in_cdc_mode = True
 
     if cdc_log:
-        if "CDC upload requested" in cdc_log:
+        if "[sys][BL] ** UPLOAD Mod ... (CDC upload requested)" in cdc_log:
             Ok("  precondition: board entered CDC upload mode")
-        elif "UPLOAD Mod" in cdc_log:
+        elif "[sys][BL] ** UPLOAD Mod" in cdc_log:
             line = [l for l in cdc_log.splitlines() if "UPLOAD Mod" in l]
             Warn("  precondition: board entered upload mode for another reason "
                  "-- IAP_ALL starts lwIP by design, so nothing here judges CDC isolation")
@@ -150,7 +149,8 @@ def verdict(cdc_replies, ether_replies, cdc_log=""):
         # No log means the precondition is unverified, not satisfied. Judging the
         # CDC half without it turns "the board never entered CDC mode" into a
         # reported defect.
-        Warn("  precondition: no serial log captured -- cannot confirm the board entered CDC mode")
+        Warn("  precondition: no boot log read (is the ST-Link connected?) -- "
+             "cannot confirm the board entered CDC mode")
         unknowns += 1
         in_cdc_mode = False
 
@@ -187,21 +187,17 @@ def main():
     ap.add_argument("--cdc", default="", help="the board's CDC COM port")
     ap.add_argument("--ip", default="")
     ap.add_argument("--listen-seconds", type=float, default=LISTEN_S)
-    ap.add_argument("--ports", nargs="*", default=None,
-                    help="serial log ports; defaults to config LOG_PORTS")
     args = ap.parse_args()
 
     cdc = args.cdc or getattr(cfg, "CDC_PORT", "")
     if not cdc:
         Fail("need --cdc <COM port> (CDC_PORT is empty in config)")
         return 1
-    ip = args.ip or getattr(cfg, "BOARD_IP", "")
+    ip = args.ip or board_ip()
     if not ip:
-        Fail("need --ip (or set BOARD_IP in config)")
+        Fail("need --ip (or BOARD_UID in config/machine.py)")
         return 1
 
-    if args.ports is None:
-        args.ports = list(cfg.LOG_PORTS)
     tool = get_iap_tool()
     big = oversize_image()
 
@@ -213,7 +209,7 @@ def main():
     print("  %d reply/replies" % len(ether_replies))
 
     cdc_log = request_mode([str(tool), "cdc", str(big), cdc], "Ask for CDC upload mode",
-                           ports=args.ports)
+                           cli=get_programmer_cli())
     Section("Probe discovery while the board is in CDC mode")
     cdc_replies = probe_discovery(ip, args.listen_seconds)
     print("  %d reply/replies" % len(cdc_replies))

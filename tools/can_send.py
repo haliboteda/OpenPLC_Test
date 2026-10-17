@@ -1,10 +1,9 @@
-"""Send a number to the board over CAN by hand and show what comes back.
+"""Send a number to the board over CAN once and show what comes back.
 
-The board runs TestCase/CAN's echo mode (CAN_ECHO_TEST_ENABLE): it transmits
-nothing on its own, and answers every frame with the payload incremented as one
-big-endian number, on the same identifier.
+A board answers when its port tool can session runs in mode=echo: the value
+plus one, on the same identifier. The Analyser class is also the CAN driver
+run_examples.py uses. No interactive mode ($PROD/docs/tables/DECISIONS.md 103).
 
-    python tools/can_send.py            interactive: type a number, press Enter
     python tools/can_send.py 5          send 5 once, print the reply, exit
     python tools/can_send.py 0xFF --len 2      send 00 FF, expect 01 00 back
     python tools/can_send.py 7 --id 123        use identifier 0x123
@@ -152,7 +151,7 @@ def one_shot(an, can_id, payload, wait):
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("value", nargs="?", default=None,
-                    help="number to send; omit for an interactive prompt")
+                    help="number to send (or give --raw)")
     ap.add_argument("--id", dest="can_id", default="0x123",
                     help="standard identifier, default 0x123")
     ap.add_argument("--len", dest="length", type=int, default=None,
@@ -166,6 +165,8 @@ def main():
                     help="seconds to wait for the reply")
     args = ap.parse_args()
 
+    if args.value is None and args.raw is None:
+        ap.error("give a number to send, or --raw")
     if args.bitrate not in SLCAN_BITRATE:
         Fail("bitrate %d has no SLCAN code" % args.bitrate)
         return 1
@@ -188,40 +189,12 @@ def main():
             Section("Send")
             return 0 if one_shot(an, can_id, bytes.fromhex(args.raw),
                                  args.wait) else 2
-        if args.value is not None:
-            Section("Send")
-            return 0 if one_shot(an, can_id, to_bytes(args.value, args.length),
-                                 args.wait) else 2
-
-        Section("Interactive")
-        print("  Type a number and press Enter. Blank line or Ctrl-C quits.")
-        print("  Decimal (5), hex (0x1F). Prefix with 'id=' to change the")
-        print("  identifier for the rest of the session, e.g. id=0x200")
-        while True:
-            try:
-                text = input("  > ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("")
-                break
-            if not text:
-                break
-            if text.lower().startswith("id="):
-                try:
-                    can_id = int(text[3:], 0)
-                    Ok("  identifier is now 0x%03X" % can_id)
-                except ValueError:
-                    Warn("  not a number")
-                continue
-            try:
-                payload = to_bytes(text, args.length)
-            except ValueError as exc:
-                Warn("  %s" % exc)
-                continue
-            one_shot(an, can_id, payload, args.wait)
+        Section("Send")
+        return 0 if one_shot(an, can_id, to_bytes(args.value, args.length),
+                             args.wait) else 2
     finally:
         an._cmd("C\r")
         an.sp.close()
-    return 0
 
 
 if __name__ == "__main__":

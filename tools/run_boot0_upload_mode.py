@@ -2,10 +2,10 @@
 
     python3 tools/run_boot0_upload_mode.py              wait up to 180s for the gesture
     python3 tools/run_boot0_upload_mode.py --wait 300
-    python3 tools/run_boot0_upload_mode.py --ports COM5
 
-The person does the whole gesture; this script only captures the board's log and
-judges it. That split is forced by the hardware, not chosen for convenience --
+The person does the whole gesture; this script only reads the board's log and
+judges it. The board ends in the bootloader, which has no USB port 1, so the log
+is read from the SRAM4 buffer over SWD: the ST-Link must be connected. That split is forced by the hardware, not chosen for convenience --
 see below.
 
     1. Press and release the reset button.
@@ -47,53 +47,58 @@ Exit 0 = R1-04 held, 1 = it did not, 2 = the run could not be set up.
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, Section, Ok, Warn, Fail, banner,  # noqa: E402
-                    close_ports, open_log_ports, read_log_ports)
+from common import (Section, Ok, Warn, Fail, assert_target_reachable, banner,  # noqa: E402
+                    boot_log_next, get_programmer_cli, read_boot_log_swd)
 
 UPLOAD_HELD = "(BOOT0 held)"
-UPLOAD_MOD = "** UPLOAD Mod"
-RESET_PIN = "** Reset cause: PIN"
-FACTORY_RAN = "Factory reset:"
+UPLOAD_MOD = "[sys][BL] ** UPLOAD Mod"
+RESET_PIN = "[sys][BL] ** Reset cause: PIN"
+FACTORY_RAN = "[sys][BL] ** Factory reset:"
+POLL_S = 3
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ports", action="append", help="log port; repeatable")
     ap.add_argument("--wait", type=int, default=180,
-                    help="seconds to capture while you do the gesture (default 180)")
+                    help="seconds to wait for the gesture (default 180)")
     args = ap.parse_args()
 
-    ports = args.ports or list(cfg.LOG_PORTS)
-
     Section("R1-04 -- BOOT0 held across a reset forces upload mode")
-    open_ports = open_log_ports(ports)
-    if not open_ports:
-        Fail("no log port opened; without the board's own log there is no verdict")
+    cli = get_programmer_cli()
+    assert_target_reachable(cli)
+    before = read_boot_log_swd(cli)
+    if before is None:
+        Fail("could not read the SRAM4 boot log over SWD; without the board's own log there is no verdict")
         return 2
+    mark = boot_log_next(before)
 
-    try:
-        banner(["DO THIS ON THE BOARD, IN THIS ORDER:",
-                "",
-                "  1. Press and release the RESET button.",
-                "  2. When the system LED starts blinking, press and HOLD BOOT0.",
-                "  3. Let go about two seconds after the blinking stops.",
-                "",
-                "Do NOT hold BOOT0 while pressing reset -- that starts ST's DFU",
-                "loader instead, and the board goes completely silent.",
-                "",
-                "%d seconds; nothing to confirm afterwards." % args.wait])
-        captured = read_log_ports(open_ports, args.wait)
-    finally:
-        close_ports(open_ports)
-
-    text = "\n".join(captured.values()) if isinstance(captured, dict) else str(captured)
+    banner(["DO THIS ON THE BOARD, IN THIS ORDER:",
+            "",
+            "  1. Press and release the RESET button.",
+            "  2. When the system LED starts blinking, press and HOLD BOOT0.",
+            "  3. Let go about two seconds after the blinking stops.",
+            "",
+            "Do NOT hold BOOT0 while pressing reset -- that starts ST's DFU",
+            "loader instead, and the board goes completely silent.",
+            "",
+            "%d seconds; nothing to confirm afterwards." % args.wait])
+    text = ""
+    deadline = time.monotonic() + args.wait
+    while time.monotonic() < deadline:
+        time.sleep(POLL_S)
+        text = "\n".join(t for _, t in read_boot_log_swd(cli, since=mark) or [])
+        if UPLOAD_MOD in text:
+            time.sleep(POLL_S)   # the lines after it
+            text = "\n".join(t for _, t in read_boot_log_swd(cli, since=mark) or [])
+            break
 
     Section("what the board said")
     if not text.strip():
-        Fail("nothing came out of the log port -- the board never rebooted. "
+        Fail("nothing new in the board's boot log -- the board never rebooted. "
              "This proves nothing about R1-04. If the board also enumerates as "
              "'DFU in FS Mode', BOOT0 was down at the reset edge; reset it once "
              "with the button released and try again.")

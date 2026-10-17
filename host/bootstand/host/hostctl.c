@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
 #include <windows.h>
 /* A crash in firmware code would otherwise end the process without a word. */
 static LONG WINAPI on_crash(EXCEPTION_POINTERS *e)
@@ -18,10 +17,6 @@ static LONG WINAPI on_crash(EXCEPTION_POINTERS *e)
 	fflush(stderr);
 	return EXCEPTION_EXECUTE_HANDLER;
 }
-#else
-#include <time.h>
-#include <unistd.h>
-#endif
 
 host_args_t host_args = {
 	.state_dir = ".", .port = 61865, .uid = { 0x39333639U, 0x31325110U, 0x00330034U },
@@ -53,9 +48,7 @@ bool host_hex_decode(const char *hex, uint8_t *out, uint32_t len)
 
 void host_parse_args(int argc, char **argv)
 {
-#ifdef _WIN32
 	SetUnhandledExceptionFilter(on_crash);
-#endif
 	for (int i = 1; i < argc; i++) {
 		const char *a = argv[i];
 		const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
@@ -104,30 +97,16 @@ void host_parse_args(int argc, char **argv)
 
 uint32_t host_tick_ms(void)
 {
-#ifdef _WIN32
 	static ULONGLONG t0;
 	if (t0 == 0U) {
 		t0 = GetTickCount64();
 	}
 	return (uint32_t)(GetTickCount64() - t0);
-#else
-	static struct timespec t0;
-	struct timespec t;
-	if (t0.tv_sec == 0) {
-		clock_gettime(CLOCK_MONOTONIC, &t0);
-	}
-	clock_gettime(CLOCK_MONOTONIC, &t);
-	return (uint32_t)((t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000);
-#endif
 }
 
 void host_sleep_ms(uint32_t ms)
 {
-#ifdef _WIN32
 	Sleep(ms);
-#else
-	usleep(ms * 1000U);
-#endif
 }
 
 void host_exit(int code)

@@ -199,7 +199,7 @@ func main() {
 func hasPrefix(s, p string) bool { return len(s) >= len(p) && s[:len(p)] == p }
 
 // defaultIAPToolPath is this platform's build from IAPTranfer_Tool's
-// compile_tool.sh, in the sibling repo (the IAPTool under test lives there).
+// build.py, in the sibling repo (the IAPTool under test lives there).
 // tools/run_case.py passes --iaptool explicitly; this is for running by hand
 // from this repo's root.
 func defaultIAPToolPath() string {

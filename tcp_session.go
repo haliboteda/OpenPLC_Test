@@ -155,7 +155,9 @@ func runT3(cfg config) result {
 	// answers an unknown option with [FATAL], so this case could not run at all
 	// between then and 2026-09-18 -- while R1-02 and R1-18 still counted it as
 	// their evidence.
-	cmd := exec.Command(cfg.iapTool, "ether", cfg.binPath, cfg.ip)
+	// -v: watchForCompletion spots the first data block by IAPTool's per-block
+	// "Sent" line, which only -v prints.
+	cmd := exec.Command(cfg.iapTool, "ether", cfg.binPath, cfg.ip, "-v")
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return fail("could not capture IAPTool output: %v", err)

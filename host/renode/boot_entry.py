@@ -35,7 +35,7 @@ sys.path.insert(0, str(HERE.parent.parent / "tools"))
 
 from build_image import build_copy  # noqa: E402
 from common import EXE, Fail, Ok, Section, cfg, get_iap_tool, get_scratch_dir, run_capture  # noqa: E402
-from run import FQBN, PLATFORM, flash_banks, symbols  # noqa: E402
+from run import FQBN, PLATFORM, boot_log_commands, boot_log_text, flash_banks, symbols  # noqa: E402
 
 APP_EXAMPLE = "SystemLED"
 # $BOOT/IAPServer/IAP_boot_handoff.h
@@ -68,7 +68,6 @@ def run_renode(work, boot_sym, run):
         "sysbus LoadBinary @%s/bank1.bin 0x08000000" % w,
         "sysbus LoadBinary @%s/bank2.bin 0x08100000" % w,
         "cpu VectorTableOffset 0x08000000",
-        "uart4 CreateFileBackend @%s/uart4.txt true" % w,
     ]
     for name in HOOKED:
         lines.append('cpu AddHook 0x%08X "self.InfoLog(\'HIT %s\')"' % (boot_sym[name], name))
@@ -85,7 +84,7 @@ def run_renode(work, boot_sym, run):
                   'emulation RunFor "00:00:%02d"' % (RUN_SECONDS - RELEASE_AT)]
     else:
         lines.append('emulation RunFor "00:00:%02d"' % RUN_SECONDS)
-    lines += ['echo "RUN DONE"', "q"]
+    lines += boot_log_commands() + ['echo "RUN DONE"', "q"]
     (work / "run.resc").write_text("\n".join(lines) + "\n")
     # stdin stays open until Renode quits (see run.py). --console opens no port.
     p = subprocess.Popen([cfg.RENODE, "--disable-gui", "--console", "-e", "include @%s/run.resc" % w],
@@ -99,30 +98,34 @@ def run_renode(work, boot_sym, run):
     timer.cancel()
     out = re.sub(r"\x1b\[[0-9;]*m", "", out)
     (work / "console.txt").write_text(out, encoding="utf-8")
-    uart4 = (work / "uart4.txt").read_text(errors="replace") if (work / "uart4.txt").exists() else ""
-    return out, uart4
+    log = boot_log_text(out)
+    (work / "bootlog.txt").write_text(log, encoding="utf-8")
+    return out, log
 
 
-def judge(run, out, uart4):
+def judge(run, out, log):
+    """log: the SRAM4 boot log; every bootloader line starts with [sys][BL]."""
     hit = {name: ("HIT " + name) in out for name in HOOKED}
-    ran = [("Renode ran the whole script", "RUN DONE" in out)]
+    bl = lambda text: ("[sys][BL] " + text) in log
+    ran = [("Renode ran the whole script", "RUN DONE" in out),
+           ("boot log read from SRAM4", bool(log))]
     if run == "plain":
-        return ran + [("BOOT0 read as not pressed", "BOOT0 button is not pressed." in uart4),
-                      ("jumped to the app", "** APP Mod" in uart4)]
+        return ran + [("BOOT0 read as not pressed", bl("BOOT0 button is not pressed.")),
+                      ("jumped to the app", bl("** APP Mod"))]
     if run == "boot0":
-        return ran + [("BOOT0 read as held at the end of the window", "** BOOT0 held" in uart4),
-                      ("upload mode because of BOOT0", "** UPLOAD Mod ... (BOOT0 held)" in uart4),
-                      ("did not jump to the app", "** APP Mod" not in uart4),
-                      ("released before 10 s: no factory reset", "Factory reset ARMED" not in uart4
-                       and "FACTORY RESET DONE" not in uart4)]
+        return ran + [("BOOT0 read as held at the end of the window", bl("** BOOT0 held")),
+                      ("upload mode because of BOOT0", bl("** UPLOAD Mod ... (BOOT0 held)")),
+                      ("did not jump to the app", not bl("** APP Mod")),
+                      ("released before 10 s: no factory reset", "Factory reset ARMED" not in log
+                       and "FACTORY RESET DONE" not in log)]
     if run == "cdc-request":
-        return ran + [("reset read as soft", "** Reset cause: SOFT" in uart4),
-                      ("upload mode because of the CDC request", "** UPLOAD Mod ... (CDC upload requested)" in uart4),
+        return ran + [("reset read as soft", bl("** Reset cause: SOFT")),
+                      ("upload mode because of the CDC request", bl("** UPLOAD Mod ... (CDC upload requested)")),
                       ("USB device initialised", hit["MX_USB_DEVICE_Init"]),
                       ("lwIP never initialised", not hit["MX_LWIP_Init"])]
-    return ran + [("reset read as soft", "** Reset cause: SOFT" in uart4),
+    return ran + [("reset read as soft", bl("** Reset cause: SOFT")),
                   ("upload mode because of the ethernet request",
-                   "** UPLOAD Mod ... (ethernet upload requested)" in uart4),
+                   bl("** UPLOAD Mod ... (ethernet upload requested)")),
                   ("lwIP initialised (control for the CDC run)", hit["MX_LWIP_Init"]),
                   ("USB device not initialised", not hit["MX_USB_DEVICE_Init"])]
 
@@ -174,8 +177,8 @@ def main():
         work = root / run
         work.mkdir()
         flash_banks(boot_bin, app_bin, get_iap_tool(), work)
-        out, uart4 = run_renode(work, boot_sym, run)
-        for name, ok in judge(run, out, uart4):
+        out, log = run_renode(work, boot_sym, run)
+        for name, ok in judge(run, out, log):
             (Ok if ok else Fail)("  %s %s" % ("ok  " if ok else "FAIL", name))
             failed |= not ok
 

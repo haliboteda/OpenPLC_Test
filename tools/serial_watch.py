@@ -1,9 +1,11 @@
-"""Watch the board's log ports. Touches nothing on the board unless --reset.
+"""Watch the board's USB port 1 (system log and what the sketch prints with
+Serial). Touches nothing on the board unless --reset.
 
     python tools/serial_watch.py                 watch until Ctrl-C
     python tools/serial_watch.py --seconds 30    watch for a while, then print
     python tools/serial_watch.py --reset         reset over ST-Link first, to catch a boot log
-    python tools/serial_watch.py --ports COM7    override the ports from config
+    python tools/serial_watch.py --sys-only      only the [sys] lines
+    python tools/serial_watch.py --ports COM12   watch these serial ports instead (the RS232 adapter)
 
     python tools/serial_watch.py --seconds 600 --until "Checking Starting Mod" --until-count 6
                                                  stop as soon as six boots have
@@ -25,8 +27,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from common import (Fail, Section, cfg, decode_serial,  # noqa: E402
-                    get_programmer_cli, open_log_ports, read_log_ports)
+from common import (Fail, Section, decode_serial,  # noqa: E402
+                    get_programmer_cli, open_board_log, open_rs232_ports,
+                    read_log_ports)
 
 
 def main():
@@ -35,18 +38,22 @@ def main():
                     help="0 = until Ctrl-C")
     ap.add_argument("--reset", action="store_true",
                     help="reset over ST-Link first, to catch a boot log")
-    ap.add_argument("--ports", nargs="*", default=None)
+    ap.add_argument("--ports", nargs="*", default=None,
+                    help="serial ports to watch instead of the board's USB port 1")
+    ap.add_argument("--sys-only", action="store_true", help="only lines starting with [sys]")
     ap.add_argument("--until", default=None,
                     help="regex; stop once it has matched --until-count times")
     ap.add_argument("--until-count", type=int, default=1)
     args = ap.parse_args()
 
-    ports = args.ports if args.ports else cfg.LOG_PORTS
-
     Section("Ports")
-    open_ports = open_log_ports(ports)
+    if args.ports:
+        open_ports = open_rs232_ports(args.ports)
+    else:
+        # Lines no host has read yet come out first; keep them.
+        open_ports = open_board_log(sys_only=args.sys_only, fresh=False)
     if not open_ports:
-        Fail("no log port could be opened")
+        Fail("no port could be opened")
         return 1
 
     if args.reset:

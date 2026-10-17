@@ -13,13 +13,13 @@
 | 根目录的 `.go` | `TestCase.exe`：对着真板子测 bootloader 的网口协议、签名、认证。import IAPTool 仓的 `iapcert` / `iapproto` 并调 IAPTool.exe |
 | `tools/check_version_sync.py`、`check_mirror_sync.py`、`check_tool_sync.py`、`check_golden_vectors.py` | 契约测试 P1、P2、P11、黄金向量：几个仓对同一份格式、常量、版本理解一致 |
 | `host/bootstand/` | bootloader 替身：`$BOOT` 的真 bootloader 代码和板卡包 app 一侧的重启握手，编成 PC 程序（`bootstand_boot` / `bootstand_app`），由 `bootstand.py` 按复位轮流启动。设计见 `$PROD/docs/engineering/BOOTLOADER-STAND-IN.md` |
-| `host/fakeboard/` | T1-18a–g（IAPTool 上传前的密钥/证书核对）、T1-34（IDE 那条上传命令）、`run_lifecycle.py`（掉电、比版本、恢复出厂、撤销）、`run_protocol.py`（现成的 Go 协议用例和归属、撤销用例），都对着上面的替身跑。替身用端口 61865，不用产品端口 56865 |
+| `host/fakeboard/` | T1-18a–g（IAPTool 上传前的密钥/证书核对）、T1-34（IDE 那条上传命令）、`run_lifecycle.py`（掉电、比版本、恢复出厂、撤销）、`run_protocol.py`（现成的 Go 协议用例和归属、撤销用例），都对着上面的替身跑。替身用端口 61865（绑不上自动换冷门端口，见 `_common.py` 的 `resolve_port()`），不用产品端口 56865 |
 | `host/renode/` | T3-05：例程在 Renode 里经真 bootloader 启动；T3-11：例程在 Renode 里的行为；T1-37：开机输出置 0 跨过跳转仍是 0、BOR 检查；T1-27 / T1-25：按住 BOOT0 进上传模式、CDC 请求不起 lwIP |
 | `tools/run_*.py`、`onboard/` | 上板用例的驱动和板上 sketch |
 | `tools/build_image.py`、`flash_bootloader.py`、`enter_bootloader.py`、`reset_board_to_factory_state.py`、`serial_watch.py` 等 | 上板用的基础设施：命令行编 bootloader、ST-Link 烧录、摆板子状态、抓串口 |
 | `tools/common.py`、`platform_info.py`、`init_machine.py` | 平台兼容层和本机路径生成器 |
 | `config/machine.py` | **本机路径的唯一出处**，gitignored，由 `tools/init_machine.py` 生成 |
-| `Output/` | gitignored：测试密钥、探针镜像、运行记录。⚠️ `Output/five-paths-keys/owner_after_claim/owner_after_claim.pem` 是目前唯一能给实验板签固件的密钥 |
+| `Output/` | gitignored：测试密钥、探针镜像、运行记录。⚠️ `Output/five-paths-keys/wipe/wipe_root.pem` 是目前唯一能给实验板签固件的密钥（2026-10-08 起） |
 
 ## 依赖并排的哪些仓
 
@@ -29,6 +29,7 @@
 | `open_plc_cube_ide`（`BOOT_REPO`） | bootloader 源码、`golden_vectors.h`、命令行编 bootloader |
 | `open_plc_arduino`（`CORE_REPO`）和已装的板卡包（`CORE_LIVE`） | 契约比对、编上板 sketch |
 | `OpenPLC_PortsTestingTool`（`PORTTOOL_REPO`，可选） | 只给 P2 的校准值区三方比对用 |
+| `OpenPLC_ETS_Prod`（`ETSPROD_REPO`，可选） | 只给 P2 镜像 17 用：调它的 `tools/gen_product.py` 重算板卡包的 KNX 对象头文件 |
 
 ## 开工前
 
@@ -40,7 +41,7 @@ python tools/selfcheck.py --list   # 每一步是什么、证明哪条需求
 
 ## 脚本的平台规矩
 
-**脚本一律 Python**，且要求**同时能在 Windows 和 Linux 上跑**。`tools/common.py` 是平台兼容层，写新脚本时：
+**脚本一律 Python**，且要求**同时能在 Windows、Linux 和 macOS 上跑**（决策 131）。例外：bootloader 替身（`host/bootstand/`）和跑在它上面的 `host/fakeboard/` 只做 Windows（决策 143），非 Windows 上 selfcheck 报 SKIP。`tools/common.py` 是平台兼容层，写新脚本时：
 
 | 要做的事 | 用这个 | 不要用 | 为什么 |
 |---|---|---|---|
@@ -54,7 +55,7 @@ python tools/selfcheck.py --list   # 每一步是什么、证明哪条需求
 
 **遇到一个新的、只有本机知道的路径** —— 加进 `tools/init_machine.py` 的 `SETTINGS` 表（连同探测方式和一段说明），不要硬编码，也不要猜。加进去它就会在每台机器上被自动找出来（理由见 `open_plc_cube_ide/CLAUDE.md` 第七节）。
 
-> ⚠️ 双平台能力**只在 Windows 上验证过**。Linux 侧是逐条消除平台依赖做的，**没有真机验证**。
+> ⚠️ 跨平台能力**只在 Windows 上验证过**。Linux、macOS 侧是逐条消除平台依赖做的，**没有真机验证**。
 
 **机器相关的路径一律进 `$TEST/config/machine.py`，而那份是 `tools/init_machine.py` 生成的** —— 不手写，也没有模板可抄。
 
@@ -69,6 +70,12 @@ python tools/selfcheck.py --list   # 每一步是什么、证明哪条需求
 **2026-08-23 实测：allow 列表不支持在字符串中间用 `*` 匹配任意前缀**，只有结尾通配符是文档确认支持的（`Bash(git *)` 这种）。所以"允许这条命令、不管前面的绝对路径是什么"这件事做不到，唯一可移植的办法就是从一开始就不在命令里写绝对路径。
 
 ⚠️ **提交进 `.claude/settings.json` 的 allow 规则只放不碰硬件、不改产品文件的命令**（读文件、跑静态检查、编译到本地产物）。**给板子刷固件、生成/替换密钥、往真实设备发升级命令**——这些哪怕本人已经批准过一百次，也不进那份**团队共享**的文件，因为一进去就是给每个 clone 这仓库的人默认放行，没人再会被问一句。这类命令要保留就放个人的 `.claude/settings.local.json`（本机专属、不进 git）。2026-08-23 把 `IAPTool.exe cdc/ether/genkey/sign` 和 `flash_bootloader.py` / `run_*.py` 这批从提交文件里挪回本地文件时发现的。
+
+### 上板调试走 RS232（COM12），不走 USB（COM17）
+
+探针、临时诊断程序自己的输出和命令一律用 `RS232` 对象（端子 C05/C06，口配在 `RS232_PORT`；`RS232.begin()` 才打开收发器，见 `$PROD/docs/hardware/HARDWARE-FACTS.md`「PB10 拉低 = 整片关断」）。用户 2026-10-10 定。
+
+板子自己的系统日志（`[sys]` 行）在 USB 口 1：脚本用 `tools/common.py` 的 `open_board_log()` 读（按 `BOARD_UID` 找口、断开重连后自己重开），板子停在 bootloader 时用 `read_boot_log_swd()` 经 ST-Link 读 SRAM4 缓存。规则见 `$PROD/docs/engineering/HOW-TO-RUN-TESTS.md`「测试从哪读板子的输出」。
 
 ### 脚本和工具不许放临时目录
 

@@ -4,14 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
 #include <windows.h>
-#else
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
 
 volatile uint32_t *hostmem_rtc_bkp;
 
@@ -41,7 +34,6 @@ static void ensure_file(const char *path, uint32_t size, uint8_t fill)
 	fclose(f);
 }
 
-#ifdef _WIN32
 static void *map_file(const char *path, uintptr_t addr, uint32_t size)
 {
 	HANDLE fh = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -68,41 +60,6 @@ static void *map_anon(uintptr_t addr, uint32_t size)
 	}
 	return p;
 }
-#else
-/* Not run yet: written for Linux, untested there. */
-static void *map_file(const char *path, uintptr_t addr, uint32_t size)
-{
-	int fd = open(path, O_RDWR);
-	if (fd < 0) {
-		die("open", path);
-	}
-	int flags = MAP_SHARED;
-#ifdef MAP_FIXED_NOREPLACE
-	if (addr != 0U) {
-		flags |= MAP_FIXED_NOREPLACE;
-	}
-#endif
-	void *p = mmap((void *)addr, size, PROT_READ | PROT_WRITE, flags, fd, 0);
-	if ((p == MAP_FAILED) || ((addr != 0U) && (p != (void *)addr))) {
-		die("mmap at the firmware address", path);
-	}
-	close(fd);
-	return p;
-}
-
-static void *map_anon(uintptr_t addr, uint32_t size)
-{
-	int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-#ifdef MAP_FIXED_NOREPLACE
-	flags |= MAP_FIXED_NOREPLACE;
-#endif
-	void *p = mmap((void *)addr, size, PROT_READ | PROT_WRITE, flags, -1, 0);
-	if ((p == MAP_FAILED) || (p != (void *)addr)) {
-		die("mmap at the firmware address", "SDRAM");
-	}
-	return p;
-}
-#endif
 
 static void map_region(const char *dir, const char *name, uintptr_t addr, uint32_t size, uint8_t fill,
 		void **out)

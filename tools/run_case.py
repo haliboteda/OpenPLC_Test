@@ -1,4 +1,4 @@
-"""Run one TestCase case while capturing the board's serial log, and optionally
+"""Run one TestCase case while capturing the board's system log, and optionally
 reset afterwards to see what the board does on the next boot.
 
     python3 tools/run_case.py --case T1-01
@@ -14,35 +14,37 @@ Exit code is the TestCase binary's own, or 1 when the --then-reset verdict fails
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (cfg, Section, Ok, Warn, Fail, close_ports,  # noqa: E402
-                    emit_file, get_go_bin, get_iap_tool, get_programmer_cli,
-                    get_scratch_file, open_log_ports, read_log_ports,
-                    run_capture, run_while_draining)
+from common import (board_ip, Section, Ok, Warn, Fail, boot_log_next,  # noqa: E402
+                    close_ports, emit_file, get_go_bin, get_iap_tool,
+                    get_programmer_cli, get_scratch_file, open_board_log,
+                    read_boot_log_swd, run_capture, run_while_draining)
 
 RESET_WATCH_S = 8
 
 
-def then_reset(ports, seconds):
-    """The G1 half: reset the board and judge what comes out of the next boot."""
+def then_reset(seconds):
+    """The G1 half: reset the board and judge what comes out of the next boot.
+    Read from the SRAM4 buffer over SWD, as the ST-Link does the reset anyway."""
     Section("Reset, then watch the next boot")
-    open2 = open_log_ports(ports)
-    out, _ = run_capture([get_programmer_cli(), "-c", "port=SWD", "mode=UR", "-rst"])
+    cli = get_programmer_cli()
+    mark = boot_log_next(read_boot_log_swd(cli) or [])
+    out, _ = run_capture([cli, "-c", "port=SWD", "mode=UR", "-rst"])
     for line in out.splitlines():
         if "Error" in line or "Reset" in line:
             print(line)
 
-    buf2 = read_log_ports(open2, seconds)
-    for k, text in buf2.items():
-        if text:
-            Section("serial %s (after reset)" % k)
-            print(text)
+    time.sleep(seconds)
+    boot = "\n".join(t for _, t in read_boot_log_swd(cli, since=mark) or [])
+    if boot:
+        Section("boot log (after reset)")
+        print(boot)
 
     Section("Verdict")
-    boot = "\n".join(buf2.values())
-    if "APP Mod" in boot:
+    if "[sys][BL] ** APP Mod" in boot:
         Ok("PASS - the previously-installed application still boots after a rejected upload.")
         Ok("       The application region was never touched. This is SDRAM staging working.")
         return 0
@@ -51,7 +53,7 @@ def then_reset(ports, seconds):
         Fail("       That is the pre-staging behaviour; staging did not take effect.")
         return 1
     if not boot.strip():
-        Warn("no serial output after reset - cannot judge")
+        Warn("no new boot log record after reset - cannot judge")
         return 1
     Warn("board booted but into neither state cleanly - read the log above")
     return 1
@@ -66,13 +68,11 @@ def main():
     ap.add_argument("--iaptool", default="")
     ap.add_argument("--then-reset", action="store_true")
     ap.add_argument("--reset-watch-seconds", type=int, default=RESET_WATCH_S)
-    ap.add_argument("--ports", nargs="*", default=None)
     args = ap.parse_args()
 
-    ports = args.ports if args.ports is not None else cfg.LOG_PORTS
-    ip = args.ip or getattr(cfg, "BOARD_IP", "")
+    ip = args.ip or board_ip()
     if not ip:
-        Fail("need --ip (or set BOARD_IP in config)")
+        Fail("need --ip (or BOARD_UID in config/machine.py)")
         return 1
 
     iaptool = Path(args.iaptool) if args.iaptool else get_iap_tool()
@@ -90,7 +90,8 @@ def main():
         argv.append("--key=%s" % keyfile)
 
     Section("Case %s" % args.case)
-    open_ports = open_log_ports(ports)
+    # Shows what the app says during the case; a board in the bootloader has no port 1.
+    open_ports = open_board_log(sys_only=True)
     print("TestCase %s" % " ".join(argv))
 
     tt_out = get_scratch_file("tt.out")
@@ -105,13 +106,13 @@ def main():
 
     for k, text in buf.items():
         if text:
-            Section("serial %s" % k)
+            Section("board log %s" % k)
             print(text)
 
     if not args.then_reset:
         return rc
 
-    return then_reset(ports, args.reset_watch_seconds)
+    return then_reset(args.reset_watch_seconds)
 
 
 if __name__ == "__main__":
