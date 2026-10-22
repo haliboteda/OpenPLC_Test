@@ -102,7 +102,7 @@ def main():
     ap.add_argument("--key", default="")
     ap.add_argument("--runs", type=int, default=2)
     ap.add_argument("--elf", default=str(Path(cfg.BOOT_REPO) / "Debug"
-                                         / "open_plc_cube_ide.elf"),
+                                         / "OpenPLC_BootLoader.elf"),
                     help="must be the bootloader that is on the board")
     args = ap.parse_args()
 

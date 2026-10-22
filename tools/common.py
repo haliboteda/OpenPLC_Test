@@ -951,7 +951,7 @@ def probe(verbose=True):
     if verbose:
         if missing:
             Warn("  -> %d thing(s) missing on this machine: %s" % (len(missing), ", ".join(missing)))
-            Warn("     see open_plc_cube_ide/CLAUDE.md for what each one is and where to get it")
+            Warn("     see OpenPLC_Docs docs/build/BUILD-AND-TEST.md for what each one is and where to get it")
         else:
             Ok("  everything config points at exists")
     return missing

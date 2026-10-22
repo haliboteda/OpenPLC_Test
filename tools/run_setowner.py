@@ -60,7 +60,7 @@ def signed_prefix(generation, new_key_hex, uid_hex):
     uid = bytes.fromhex(uid_hex)
     if len(uid) != 12:
         raise ValueError("uid must be 24 hex characters, got %r" % uid_hex)
-    # Layout: open_plc_cube_ide/IAPServer/owner_slot.h.
+    # Layout: OpenPLC_BootLoader/IAPServer/owner_slot.h.
     return (bytes([0x4F, 0])                      # type 'O', reserved0
             + struct.pack("<H", OWNER_FORMAT_VER)
             + struct.pack("<I", generation)

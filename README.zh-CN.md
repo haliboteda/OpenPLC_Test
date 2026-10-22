@@ -17,7 +17,7 @@ English: [README.md](README.md)
 ## 需要什么
 
 Go 1.23 以上、Python 3，以及克隆在本仓旁边的这几个仓库：`IAPTranfer_Tool`、
-`open_plc_cube_ide`、`open_plc_arduino`（`OpenPLC_PortsTestingTool` 可选）。上板用例还要
+`OpenPLC_BootLoader`、`open_plc_arduino`（`OpenPLC_PortsTestingTool` 可选）。上板用例还要
 STM32CubeIDE（用它带的 STM32_Programmer_CLI）和 Arduino IDE。
 
 ## 怎么跑

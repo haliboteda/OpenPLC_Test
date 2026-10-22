@@ -8,7 +8,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(bootstand C)
 
-set(BOOT_ROOT "" CACHE PATH "the bootloader repo (open_plc_cube_ide)")
+set(BOOT_ROOT "" CACHE PATH "the bootloader repo (OpenPLC_BootLoader)")
 set(CORE_ROOT "" CACHE PATH "the board package repo (open_plc_arduino)")
 # openplc_app_version the application half reports. 0.0.1: older than any
 # sketch, so IAPTool's version gate never refuses. Not a cache entry, so a build

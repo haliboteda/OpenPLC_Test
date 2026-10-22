@@ -145,7 +145,7 @@ def main():
     ap.add_argument("--seconds", type=int, default=12)
     args = ap.parse_args()
 
-    elf = Path(args.elf) if args.elf else Path(cfg.BOOT_REPO) / "Debug" / "open_plc_cube_ide.elf"
+    elf = Path(args.elf) if args.elf else Path(cfg.BOOT_REPO) / "Debug" / "OpenPLC_BootLoader.elf"
     cli = get_programmer_cli()
 
     Section("Target check")

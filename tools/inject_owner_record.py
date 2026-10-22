@@ -66,7 +66,7 @@ def record(generation, format_ver, flags, key_hex, filler, uid=b"", record_type=
     """One 160-byte 'O' record. prev_sig and reserved stay zero.
 
     Byte 1 is reserved and always 0, so a --v1 record differs from a real one
-    only in format_ver. Layout: open_plc_cube_ide/IAPServer/owner_slot.h.
+    only in format_ver. Layout: OpenPLC_BootLoader/IAPServer/owner_slot.h.
     """
     rec = bytearray(RECORD_SIZE)
     rec[0] = record_type                                # 'O' (0x4F); 'R' is a separate 32-byte layout

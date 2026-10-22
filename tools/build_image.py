@@ -21,7 +21,7 @@ sys.path.insert(0, str(HERE))
 
 from common import cfg, get_cube_ide_exe, Section, Ok, Warn, Fail, read_text  # noqa: E402
 
-PROJECT = "open_plc_cube_ide/Debug"
+PROJECT = "OpenPLC_BootLoader/Debug"
 
 # Warnings that are a consequence of a deliberate design choice, matched on an
 # exact substring so nothing else hides behind them.
@@ -120,7 +120,7 @@ def build(project=None, workspace=None):
     else:
         Ok("0 errors, %s warning(s) - as expected" % warnings)
 
-    binary = Path(project or cfg.BOOT_REPO) / "Debug" / "open_plc_cube_ide.bin"
+    binary = Path(project or cfg.BOOT_REPO) / "Debug" / "OpenPLC_BootLoader.bin"
     if not binary.exists():
         Fail("no .bin at %s" % binary)
         return None
@@ -142,7 +142,7 @@ def build_copy(dest):
     """
     files = subprocess.run(["git", "-C", str(cfg.BOOT_REPO), "ls-files", "-z", "-co", "--exclude-standard"],
                            stdout=subprocess.PIPE, check=True).stdout.decode("utf-8").split("\0")
-    project = Path(dest) / "open_plc_cube_ide"
+    project = Path(dest) / "OpenPLC_BootLoader"
     for name in filter(None, files):
         src = Path(cfg.BOOT_REPO) / name
         if src.is_file():
@@ -150,7 +150,7 @@ def build_copy(dest):
             shutil.copy2(str(src), str(project / name))
     if build(project, Path(dest) / "workspace") is None:
         return None
-    return project / "Debug" / "open_plc_cube_ide.bin"
+    return project / "Debug" / "OpenPLC_BootLoader.bin"
 
 
 def main():

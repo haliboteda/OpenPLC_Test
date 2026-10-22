@@ -66,7 +66,7 @@ def build(boot_repo):
     out = subprocess.run(
         [str(get_cube_ide_exe()), "--launcher.suppressErrors", "-nosplash",
          "-application", "org.eclipse.cdt.managedbuilder.core.headlessbuild",
-         "-data", str(cfg.WORKSPACE), "-build", "open_plc_cube_ide/Debug"],
+         "-data", str(cfg.WORKSPACE), "-build", "OpenPLC_BootLoader/Debug"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, errors="replace").stdout or ""
 
@@ -94,7 +94,7 @@ def build(boot_repo):
                     break
         return False
 
-    elf = Path(boot_repo) / "Debug" / "open_plc_cube_ide.elf"
+    elf = Path(boot_repo) / "Debug" / "OpenPLC_BootLoader.elf"
     if not elf.exists():
         Fail("no .elf produced - stopping")
         return False
@@ -120,7 +120,7 @@ def main():
         args.skip_build = True
 
     boot_repo = cfg.BOOT_REPO
-    elf = Path(args.elf) if args.elf else Path(boot_repo) / "Debug" / "open_plc_cube_ide.elf"
+    elf = Path(args.elf) if args.elf else Path(boot_repo) / "Debug" / "OpenPLC_BootLoader.elf"
     bin_path = elf.with_suffix(".bin")
     cli = get_programmer_cli()
 

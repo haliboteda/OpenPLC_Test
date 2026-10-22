@@ -26,7 +26,7 @@
 | 仓 | 拿来干什么 |
 |---|---|
 | `IAPTranfer_Tool`（`IAPTOOL_REPO`） | 被测的 IAPTool：Go 包经 `go.mod` 的 `replace` 引用，可执行文件从它的 `Output/` 或板卡包里找 |
-| `open_plc_cube_ide`（`BOOT_REPO`） | bootloader 源码、`golden_vectors.h`、命令行编 bootloader |
+| `OpenPLC_BootLoader`（`BOOT_REPO`） | bootloader 源码、`golden_vectors.h`、命令行编 bootloader |
 | `open_plc_arduino`（`CORE_REPO`）和已装的板卡包（`CORE_LIVE`） | 契约比对、编上板 sketch |
 | `OpenPLC_PortsTestingTool`（`PORTTOOL_REPO`，可选） | 只给 P2 的校准值区三方比对用 |
 | `OpenPLC_ETS_Prod`（`ETSPROD_REPO`，可选） | 只给 P2 镜像 17 用：调它的 `tools/gen_product.py` 重算板卡包的 KNX 对象头文件 |
@@ -53,7 +53,7 @@ python tools/selfcheck.py --list   # 每一步是什么、证明哪条需求
 | 板卡包平台目录 | `A15_DIR`（`win`/`linux`/`macosx`） | 硬写 `win` | — |
 | CubeIDE 插件后缀 | `CUBE_PLUG`（`win32`/`linux64`/`macos64`） | 硬写 `win32` | — |
 
-**遇到一个新的、只有本机知道的路径** —— 加进 `tools/init_machine.py` 的 `SETTINGS` 表（连同探测方式和一段说明），不要硬编码，也不要猜。加进去它就会在每台机器上被自动找出来（理由见 `open_plc_cube_ide/CLAUDE.md` 第七节）。
+**遇到一个新的、只有本机知道的路径** —— 加进 `tools/init_machine.py` 的 `SETTINGS` 表（连同探测方式和一段说明），不要硬编码，也不要猜。加进去它就会在每台机器上被自动找出来（理由见 `OpenPLC_BootLoader/CLAUDE.md` 第七节）。
 
 > ⚠️ 跨平台能力**只在 Windows 上验证过**。Linux、macOS 侧是逐条消除平台依赖做的，**没有真机验证**。
 
@@ -65,7 +65,7 @@ python tools/selfcheck.py --list   # 每一步是什么、证明哪条需求
 
 > **2026-08-20 删掉了 `machine.example.py`。** 它们和 `SETTINGS` 表是同一份清单的两个出处。而且模板那套"两个平台的值都给、删掉不用的那套"的用法，**忘记删是最常见的错误** —— 第一次在 Debian 上就踩了，表现是一堆互不相关的 MISSING，加上一句让人去查串口线的错误建议。
 
-⚠️ **这条不止管脚本内部，还管 AI 会话怎么打命令。** 从一个仓库的会话里调另一个仓库的脚本（例如在 `open_plc_cube_ide` 里跑 `OpenPLC_Test/tools/selfcheck.py`），**用相对路径 `../OpenPLC_Test`，不要绝对路径**。第三节那张兄弟目录表已经把布局钉死了，相对路径换机器天然成立；绝对路径（`E:\WorkSpace\...`）只在这台机器上对，写进 `.claude/settings.local.json` 的 allow 列表里，换机器就是一条永远不会再命中的死记录。
+⚠️ **这条不止管脚本内部，还管 AI 会话怎么打命令。** 从一个仓库的会话里调另一个仓库的脚本（例如在 `OpenPLC_BootLoader` 里跑 `OpenPLC_Test/tools/selfcheck.py`），**用相对路径 `../OpenPLC_Test`，不要绝对路径**。第三节那张兄弟目录表已经把布局钉死了，相对路径换机器天然成立；绝对路径（`E:\WorkSpace\...`）只在这台机器上对，写进 `.claude/settings.local.json` 的 allow 列表里，换机器就是一条永远不会再命中的死记录。
 
 **2026-08-23 实测：allow 列表不支持在字符串中间用 `*` 匹配任意前缀**，只有结尾通配符是文档确认支持的（`Bash(git *)` 这种）。所以"允许这条命令、不管前面的绝对路径是什么"这件事做不到，唯一可移植的办法就是从一开始就不在命令里写绝对路径。
 

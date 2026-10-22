@@ -350,7 +350,7 @@ SETTINGS = [
     ("__section__", "repositories",
      ["The three repos this product is built from.",
       "See $PROD/docs/repo/ARCHITECTURE.md."]),
-    ("BOOT_REPO", "path", detect_repo("open_plc_cube_ide"), True,
+    ("BOOT_REPO", "path", detect_repo("OpenPLC_BootLoader"), True,
      ["bootloader, CubeIDE project, and the shared docs"]),
     ("CORE_REPO", "path", detect_repo("open_plc_arduino"), True,
      ["the Arduino board package, under version control"]),
@@ -463,7 +463,7 @@ NOTES = []
 # second line the reply to "not found" is reasonably "but it IS installed".
 EXAMPLES = {
     "windows": {
-        "BOOT_REPO": r"E:\WorkSpace\Schaeffer-AG\open_plc_cube_ide",
+        "BOOT_REPO": r"E:\WorkSpace\Schaeffer-AG\OpenPLC_BootLoader",
         "CORE_REPO": r"E:\WorkSpace\Schaeffer-AG\open_plc_arduino",
         "TEST_REPO": r"E:\WorkSpace\Schaeffer-AG\OpenPLC_Test",
         "IAPTOOL_REPO": r"E:\WorkSpace\Schaeffer-AG\IAPTranfer_Tool",
@@ -489,7 +489,7 @@ EXAMPLES = {
         "CDC_PORT": "COM6",
     },
     "posix": {
-        "BOOT_REPO": "/home/you/Documents/WorkSpace/open_plc_cube_ide",
+        "BOOT_REPO": "/home/you/Documents/WorkSpace/OpenPLC_BootLoader",
         "CORE_REPO": "/home/you/Documents/WorkSpace/open_plc_arduino",
         "TEST_REPO": "/home/you/Documents/WorkSpace/OpenPLC_Test",
         "IAPTOOL_REPO": "/home/you/Documents/WorkSpace/IAPTranfer_Tool",
@@ -515,7 +515,7 @@ EXAMPLES = {
     # "posix". Handing a mac user a /home/you path or a /dev/ttyUSB0 would be a
     # wrong answer dressed as help -- neither exists there.
     "macos": {
-        "BOOT_REPO": "/Users/you/WorkSpace/open_plc_cube_ide",
+        "BOOT_REPO": "/Users/you/WorkSpace/OpenPLC_BootLoader",
         "CORE_REPO": "/Users/you/WorkSpace/open_plc_arduino",
         "TEST_REPO": "/Users/you/WorkSpace/OpenPLC_Test",
         "IAPTOOL_REPO": "/Users/you/WorkSpace/IAPTranfer_Tool",
@@ -548,7 +548,7 @@ def example_for(key):
     return EXAMPLES["posix"].get(key)
 
 WHAT_IT_IS = {
-    "BOOT_REPO": "the open_plc_cube_ide clone -- bootloader plus the shared docs",
+    "BOOT_REPO": "the OpenPLC_BootLoader clone -- the bootloader",
     "CORE_REPO": "the open_plc_arduino clone -- the board package under git",
     "TEST_REPO": "this repo, OpenPLC_Test",
     "IAPTOOL_REPO": "the IAPTranfer_Tool clone: IAPTool, the uploader under test",
@@ -1145,7 +1145,7 @@ def main():
             Warn("  Skipped at the prompt. Install one and re-run, or --set it.")
         else:
             Warn("  Not asked for interactively, because %s." % why_not)
-        Warn("  open_plc_cube_ide/CLAUDE.md says what each one is and where to get it.")
+        Warn("  OpenPLC_Docs docs/build/BUILD-AND-TEST.md says what each one is and where to get it.")
 
     Section("files")
     targets = [("machine.py", render_python(RESOLVED))]
